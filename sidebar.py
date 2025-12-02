@@ -1,3 +1,4 @@
+# sidebar.py
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QPushButton
 from PySide6.QtCore import Signal
 
@@ -15,18 +16,16 @@ class Sidebar(QWidget):
         self.buttons = []
 
         menu_list = [
-            "📊 Dashboard",
+            "🏠 Dashboard",
             "📁 Dataset",
-            "🛠 Training Settings",
-            "🧪 Train Model",
-            "🔍 Predict"
+            "🧪 Train",
+            "📚 History",
+            "🔍 Predict",
         ]
 
         for index, text in enumerate(menu_list):
             btn = QPushButton(text)
             btn.setCheckable(True)
-
-            # 기본 버튼 스타일 (라이트 그레이톤)
             btn.setStyleSheet("""
                 QPushButton {
                     background-color: #E9E9E9;
@@ -40,7 +39,6 @@ class Sidebar(QWidget):
                     background-color: #F5F5F5;
                 }
             """)
-
             btn.clicked.connect(lambda checked, i=index: self.on_button_clicked(i))
             self.buttons.append(btn)
             layout.addWidget(btn)
@@ -48,20 +46,18 @@ class Sidebar(QWidget):
         layout.addStretch()
         self.current_index = None
 
-    def on_button_clicked(self, index):
+    def on_button_clicked(self, index: int):
         self.set_active(index)
         self.menu_clicked.emit(index)
 
-    def set_active(self, index):
-        """활성 버튼만 하늘색 + 눌린 느낌으로 표시"""
+    def set_active(self, index: int):
         for i, btn in enumerate(self.buttons):
             if i == index:
-                # 눌린버튼처럼 보이게 inset-style 효과 적용
                 btn.setChecked(True)
                 btn.setStyleSheet("""
                     QPushButton {
-                        background-color: #A7D8FF;          /* 밝은 하늘색 */
-                        border: 1px solid #6BB6FF;         /* 조금 더 진한 파랑 */
+                        background-color: #A7D8FF;
+                        border: 1px solid #6BB6FF;
                         padding: 8px;
                         font-size: 14px;
                         text-align: left;
@@ -72,7 +68,6 @@ class Sidebar(QWidget):
                     }
                 """)
             else:
-                # 디폴트 디자인으로 복원
                 btn.setChecked(False)
                 btn.setStyleSheet("""
                     QPushButton {
@@ -87,5 +82,4 @@ class Sidebar(QWidget):
                         background-color: #F5F5F5;
                     }
                 """)
-
         self.current_index = index

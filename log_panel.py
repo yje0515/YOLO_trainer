@@ -1,4 +1,6 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QTextEdit
+# log_panel.py
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QLabel
+from PySide6.QtCore import QDateTime
 
 
 class LogPanel(QWidget):
@@ -6,16 +8,20 @@ class LogPanel(QWidget):
         super().__init__()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 5, 10, 10)
+        layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(4)
 
-        self.label = QLabel("📜 Log")
-        self.edit = QTextEdit()
-        self.edit.setReadOnly(True)
-        self.edit.setFixedHeight(150)
+        title = QLabel("📜 Logs")
+        title.setStyleSheet("font-weight: bold;")
 
-        layout.addWidget(self.label)
-        layout.addWidget(self.edit)
+        self.text = QTextEdit()
+        self.text.setReadOnly(True)
+        self.text.setMinimumHeight(120)
+        self.text.setStyleSheet("font-family: Consolas; font-size: 12px;")
 
-    def log(self, text: str):
-        self.edit.append(text)
+        layout.addWidget(title)
+        layout.addWidget(self.text)
+
+    def log(self, message: str):
+        now = QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm:ss")
+        self.text.append(f"[{now}] {message}")

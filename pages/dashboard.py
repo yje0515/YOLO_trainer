@@ -1,5 +1,5 @@
+# pages/dashboard.py
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
-from PySide6.QtGui import QFont
 
 
 class DashboardPage(QWidget):
@@ -8,14 +8,16 @@ class DashboardPage(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(10)
 
-        title = QLabel("📊 Dashboard")
-        font = QFont()
-        font.setPointSize(14)
-        font.setBold(True)
-        title.setFont(font)
+        title = QLabel("🏠 YOLO Trainer Dashboard")
+        title.setStyleSheet("font-size: 20px; font-weight: bold;")
 
-        desc = QLabel("최근 학습 기록, 상태 요약 등이 들어갈 대시보드 화면입니다.")
+        desc = QLabel(
+            "이 프로그램은 Roboflow에서 데이터셋을 받아와서\n"
+            "YOLO 모델을 학습하고, 학습 이력을 관리하고, 예측까지 할 수 있는\n"
+            "지은님 개인용 데스크톱 트레이너입니다."
+        )
         desc.setWordWrap(True)
 
         layout.addWidget(title)

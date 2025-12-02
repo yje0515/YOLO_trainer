@@ -1,0 +1,24 @@
+{
+    "timestamp": "251202_1754",
+    "model_file": "models\\best_251202_1754.pt",
+    "run_dir": "C:\\yje\\side_workspace\\yolo_trainer\\runs\\detect\\train",
+    "epochs": 1,
+    "patience": 1,
+    "metrics": {
+        "epoch": "1",
+        "time": "84.704",
+        "train/box_loss": "1.38816",
+        "train/cls_loss": "1.42192",
+        "train/dfl_loss": "1.26609",
+        "metrics/precision(B)": "0.88704",
+        "metrics/recall(B)": "0.89817",
+        "metrics/mAP50(B)": "0.87938",
+        "metrics/mAP50-95(B)": "0.6213",
+        "val/box_loss": "1.09154",
+        "val/cls_loss": "1.00812",
+        "val/dfl_loss": "1.12642",
+        "lr/pg0": "0.000554223",
+        "lr/pg1": "0.000554223",
+        "lr/pg2": "0.000554223"
+    }
+}

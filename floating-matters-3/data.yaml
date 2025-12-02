@@ -1,0 +1,13 @@
+names:
+- plastic
+- twig
+nc: 2
+roboflow:
+  license: MIT
+  project: floating-matters-mmivq
+  url: https://universe.roboflow.com/mbc320yje/floating-matters-mmivq/dataset/3
+  version: 3
+  workspace: mbc320yje
+test: ../test/images
+train: ../train/images
+val: ../valid/images
