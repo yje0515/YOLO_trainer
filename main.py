@@ -6,8 +6,10 @@
 # exe 실행 파일 얻기 (프로젝트 최종 완성 후)
 # pip install pyinstaller
 # pyinstaller --noconsole --onefile main.py
+
 import sys
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget
+
 from sidebar import Sidebar
 from log_panel import LogPanel
 
@@ -65,6 +67,11 @@ class MainWindow(QMainWindow):
         container_layout.addWidget(self.log_panel, stretch=0)
 
         self.setCentralWidget(container)
+
+        # ⬇⬇⬇ 신호 연결 추가 (중요)
+        self.page_dataset.run_code_signal.connect(self.log_panel.log)
+        self.page_train_model.train_log_signal.connect(self.log_panel.log)
+        # ⬆⬆⬆ 이거 있어야 로그 다 뜸!
 
         # 기본 페이지 = Dashboard
         self.change_page(0)
