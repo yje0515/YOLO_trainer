@@ -1,0 +1,8 @@
+{
+    "dataset_dir": "C:/yolo_data/datasets",
+    "runs_dir": "C:/yolo_data/runs",
+    "models_dir": "C:/yolo_data/models",
+    "predict_output_dir": "C:/yolo_data/predict_output",
+    "history_dir": "C:/yolo_data/history",
+    "temp_dir": "C:/yolo_data/temp"
+}
