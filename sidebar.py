@@ -17,8 +17,8 @@ class Sidebar(QWidget):
 
         menu_list = [
             "🏠 Dashboard",
-            "📚 History",
-            "📁 Dataset",
+            "📚 Model History",
+            "📁 Dataset Download",
             "🧪 Train",
             "🔍 Predict",
         ]

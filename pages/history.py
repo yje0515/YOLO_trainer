@@ -6,44 +6,66 @@ from PySide6.QtWidgets import (
 
 
 class HistoryPage(QWidget):
-    def __init__(self, settings):
+    def __init__(self, settings: dict):
         super().__init__()
-
         self.settings = settings
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(30, 30, 30, 30)
 
-        title = QLabel("📜 학습 히스토리")
-        title.setStyleSheet("font-size: 18px; font-weight: bold;")
+        title = QLabel("📜 Model History")
+        title.setStyleSheet("font-size:18px; font-weight:bold;")
         layout.addWidget(title)
 
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(["시간", "모델 파일", "Epoch", "Patience", "mAP50"])
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(
+            ["시간", "경로", "YOLO 모델", "Epochs", "Patience", "mAP50"]
+        )
         self.table.horizontalHeader().setStretchLastSection(True)
 
         layout.addWidget(self.table)
+        layout.addStretch()
 
-        self.load_history()
+        self.reload_history()
 
-    def load_history(self):
-        history_dir = self.settings.get("history_dir", "history")
+    def update_paths(self, settings: dict):
+        self.settings = settings
+        self.reload_history()
 
-        if not os.path.exists(history_dir):
+    def reload_history(self, *_):
+        self.table.setRowCount(0)
+        history_root = self.settings.get("history_dir", "./history")
+        if not os.path.isdir(history_root):
             return
 
-        for file in os.listdir(history_dir):
-            if not file.endswith(".json"):
+        entries = []
+        for name in os.listdir(history_root):
+            sub = os.path.join(history_root, name)
+            if not os.path.isdir(sub):
                 continue
+            meta = os.path.join(sub, "metadata.json")
+            if os.path.exists(meta):
+                entries.append(meta)
 
-            with open(os.path.join(history_dir, file), "r", encoding="utf-8") as f:
+        entries.sort()
+
+        for meta_path in entries:
+            with open(meta_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
             row = self.table.rowCount()
             self.table.insertRow(row)
 
-            self.table.setItem(row, 0, QTableWidgetItem(data.get("timestamp", "-")))
-            self.table.setItem(row, 1, QTableWidgetItem(data.get("model_file", "-")))
-            self.table.setItem(row, 2, QTableWidgetItem(str(data.get("epochs", "-"))))
-            self.table.setItem(row, 3, QTableWidgetItem(str(data.get("patience", "-"))))
-            self.table.setItem(row, 4, QTableWidgetItem(str(data.get("metrics", {}).get("metrics/mAP50", "-"))))
+            ts = data.get("timestamp", "-")
+            model_file = data.get("models_file", "-")
+            base_model = data.get("base_model", "-")
+            epochs = str(data.get("epochs", "-"))
+            patience = str(data.get("patience", "-"))
+            mAP50 = str(data.get("metrics", {}).get("metrics/mAP50(B)", data.get("metrics", {}).get("metrics/mAP50", "-")))
+
+            self.table.setItem(row, 0, QTableWidgetItem(ts))
+            self.table.setItem(row, 1, QTableWidgetItem(model_file))
+            self.table.setItem(row, 2, QTableWidgetItem(base_model))
+            self.table.setItem(row, 3, QTableWidgetItem(epochs))
+            self.table.setItem(row, 4, QTableWidgetItem(patience))
+            self.table.setItem(row, 5, QTableWidgetItem(mAP50))
