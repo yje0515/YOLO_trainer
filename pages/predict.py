@@ -1,285 +1,277 @@
 import os
-import shutil
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QPushButton,
-    QHBoxLayout, QFileDialog, QComboBox
-)
-from PySide6.QtCore import QUrl, Qt
-from PySide6.QtGui import QPixmap
+import datetime
+import cv2
+import numpy as np
 
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
-from PySide6.QtMultimediaWidgets import QVideoWidget
+from PySide6.QtCore import QThread, Signal, Qt
+from PySide6.QtGui import QPixmap, QImage
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QLabel, QPushButton, QFileDialog,
+    QComboBox, QTextEdit, QHBoxLayout, QSlider
+)
 
 from ultralytics import YOLO
 
 
+# ====================================
+#   실시간 YOLO Predict Worker
+# ====================================
+class PredictWorker(QThread):
+    frame_ready = Signal(np.ndarray)
+    finished_ok = Signal(str)
+    log_signal = Signal(str)
+
+    def __init__(self, model_path, source_path, save_dir, conf: float = 0.5):
+        super().__init__()
+        self.model_path = model_path
+        self.source_path = source_path
+        self.save_dir = save_dir          # project 경로
+        self.conf = conf                  # 0.0 ~ 1.0
+
+    def run(self):
+        model = YOLO(self.model_path)
+
+        # stream=True 로 결과를 하나씩 받아서 실시간 미리보기 + 저장 둘 다 수행
+        results = model.predict(
+            source=self.source_path,
+            save=True,
+            project=self.save_dir,
+            name="results",
+            conf=self.conf,
+            stream=True,
+            exist_ok=True,
+            verbose=False
+        )
+
+        for r in results:
+            annotated = r.plot()   # YOLO가 박스까지 그린 프레임 (BGR ndarray)
+            self.frame_ready.emit(annotated)
+
+        # 최종 저장 폴더: save_dir/name
+        final_dir = os.path.join(self.save_dir, "results")
+        self.finished_ok.emit(final_dir)
+
+
+# ====================================
+#   Predict Page UI
+# ====================================
 class PredictPage(QWidget):
+
     def __init__(self, settings: dict):
         super().__init__()
-        self.update_paths(settings)
         self.overlay = None
-        self.media_path = None
+        self.paths = settings
+        self.selected_path = None
 
-        # ===============================
-        #  --- 메인 레이아웃 (상단 정렬!!)
-        # ===============================
         layout = QVBoxLayout(self)
         layout.setContentsMargins(30, 30, 30, 30)
-        layout.setSpacing(10)
-        layout.setAlignment(Qt.AlignTop)   # ★ 상단 정렬로 고정
 
-        # ---------------------------
-        # 제목
-        # ---------------------------
-        title = QLabel("🔍 Predict Model")
+        title = QLabel("🔍 Predict")
         title.setStyleSheet("font-size:18px; font-weight:bold;")
         layout.addWidget(title)
 
-        # ---------------------------
-        # 모델 선택
-        # ---------------------------
+        # -------------------------------------------------
+        # 1) 모델 선택
+        # -------------------------------------------------
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("모델 선택:"))
         self.model_combo = QComboBox()
         row1.addWidget(self.model_combo)
         layout.addLayout(row1)
 
-        btn_refresh = QPushButton("🔄 모델 새로고침(최신순)")
-        btn_refresh.clicked.connect(self.refresh_model_list)
-        layout.addWidget(btn_refresh)
+        # -------------------------------------------------
+        # 2) Confidence 슬라이더 (직관적인 UI)
+        # -------------------------------------------------
+        row_conf = QHBoxLayout()
+        row_conf.addWidget(QLabel("Confidence:"))
 
-        btn_file = QPushButton("📂 모델 파일 불러오기")
-        btn_file.clicked.connect(self.load_model_file)
+        self.conf_slider = QSlider(Qt.Horizontal)
+        self.conf_slider.setRange(10, 90)     # 10% ~ 90%
+        self.conf_slider.setValue(50)         # 기본 50%
+        self.conf_slider.setTickInterval(5)
+        self.conf_slider.setSingleStep(1)
+        row_conf.addWidget(self.conf_slider)
+
+        self.conf_label = QLabel("50% 이상만 표시")
+        row_conf.addWidget(self.conf_label)
+
+        self.conf_slider.valueChanged.connect(self.on_conf_changed)
+        layout.addLayout(row_conf)
+
+        # -------------------------------------------------
+        # 3) 파일 선택
+        # -------------------------------------------------
+        btn_file = QPushButton("📂 이미지/영상 선택")
+        btn_file.clicked.connect(self.select_file)
         layout.addWidget(btn_file)
 
-        # ---------------------------
-        # 미디어 선택
-        # ---------------------------
-        btn_media = QPushButton("📂 이미지 / 영상 선택")
-        btn_media.clicked.connect(self.select_media)
-        layout.addWidget(btn_media)
+        # -------------------------------------------------
+        # 4) 미리보기 라벨
+        # -------------------------------------------------
+        self.previewLabel = QLabel("미리보기 없음")
+        self.previewLabel.setFixedHeight(300)
+        self.previewLabel.setAlignment(Qt.AlignCenter)
+        self.previewLabel.setStyleSheet(
+            "border:1px solid #444; background:#111; color:#888;"
+        )
+        layout.addWidget(self.previewLabel)
 
-        # 선택된 파일 표시
-        self.path_label = QLabel("📂 선택된 파일: 없음")
-        layout.addWidget(self.path_label)
+        # -------------------------------------------------
+        # 5) 실행 버튼
+        # -------------------------------------------------
+        btn_run = QPushButton("🚀 추론 실행")
+        btn_run.clicked.connect(self.run_predict)
+        layout.addWidget(btn_run)
 
-        # ---------------------------
-        # Predict 실행
-        # ---------------------------
-        btn_predict = QPushButton("🚀 Predict 실행")
-        btn_predict.clicked.connect(self.run_predict)
-        layout.addWidget(btn_predict)
+        # -------------------------------------------------
+        # 6) 로그 박스
+        # -------------------------------------------------
+        self.log_box = QTextEdit()
+        self.log_box.setReadOnly(True)
+        layout.addWidget(self.log_box)
 
-        # ---------------------------
-        # 이미지 미리보기
-        # ---------------------------
-        self.image_preview = QLabel()
-        self.image_preview.setMinimumHeight(320)
-        self.image_preview.setStyleSheet("border:1px solid gray; background:black;")
-        self.image_preview.setAlignment(Qt.AlignCenter)    # ★ 비율 유지
-        self.image_preview.setScaledContents(False)        # ★ 찌그러짐 방지
-        layout.addWidget(self.image_preview)
+        layout.addStretch()
 
-        # ---------------------------
-        # 영상 미리보기
-        # ---------------------------
-        self.video_widget = QVideoWidget()
-        self.video_widget.setMinimumHeight(320)
-        layout.addWidget(self.video_widget)
-        self.video_widget.hide()
-
-        # Video Player
-        self.media_player = QMediaPlayer(self)
-        self.audio_output = QAudioOutput(self)
-        self.media_player.setVideoOutput(self.video_widget)
-        self.media_player.setAudioOutput(self.audio_output)
-
-        # 모델 리스트 로드
+        # 초기 모델 목록 로드
         self.refresh_model_list()
 
-    # ---------------------------
-    # overlay 연결
-    # ---------------------------
+    # =======================================================
+    # main.py에서 필요한 필수 메서드
+    # =======================================================
+
     def set_overlay(self, overlay):
         self.overlay = overlay
 
-    # ---------------------------
-    # 경로 업데이트
-    # ---------------------------
-    def update_paths(self, settings):
-        self.models_dir = settings["models_dir"]
-        self.predict_output = settings["predict_output_dir"]
-
-        os.makedirs(self.models_dir, exist_ok=True)
-        os.makedirs(self.predict_output, exist_ok=True)
-
-    # ---------------------------
-    # 모델 새로고침 (최신순)
-    # ---------------------------
-    def refresh_model_list(self):
-        self.model_combo.clear()
-
-        if not os.path.isdir(self.models_dir):
-            self.model_combo.addItem("(모델 없음)")
-            return
-
-        files = [
-            f for f in os.listdir(self.models_dir)
-            if f.lower().endswith(".pt")
-        ]
-
-        files = sorted(
-            files,
-            key=lambda x: os.path.getmtime(os.path.join(self.models_dir, x)),
-            reverse=True
-        )
-
-        if not files:
-            self.model_combo.addItem("(모델 없음)")
-        else:
-            self.model_combo.addItems(files)
-
-    # ---------------------------
-    # 모델 파일 직접 불러오기
-    # ---------------------------
-    def load_model_file(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "모델 파일 선택", ".", "PyTorch Model (*.pt)"
-        )
-        if not path:
-            return
-
-        name = os.path.basename(path)
-        dst = os.path.join(self.models_dir, name)
-
-        if not os.path.exists(dst):
-            shutil.copy(path, dst)
-
+    def update_paths(self, settings: dict):
+        self.paths = settings
         self.refresh_model_list()
-        self.model_combo.setCurrentText(name)
 
-    # ---------------------------
-    # 이미지 / 영상 선택
-    # ---------------------------
-    def select_media(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Image or Video",
-            ".",
-            "Media (*.jpg *.jpeg *.png *.bmp *.mp4 *.avi *.mov *.mkv)"
+    def refresh_model_list(self, _=None):
+        self.model_combo.clear()
+        models_dir = self.paths.get("models_dir", "")
+
+        if not os.path.exists(models_dir):
+            return
+
+        for f in os.listdir(models_dir):
+            if f.endswith(".pt"):
+                self.model_combo.addItem(f)
+
+    # =======================================================
+    # Confidence 슬라이더 값 변경 시 라벨 업데이트
+    # =======================================================
+    def on_conf_changed(self, value: int):
+        self.conf_label.setText(f"{value}% 이상만 표시")
+
+    # =======================================================
+    # 파일 선택 → 즉시 미리보기
+    # =======================================================
+    def select_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Image or Video", ".", "Files (*.jpg *.png *.mp4 *.avi)"
         )
+        if path:
+            self.selected_path = path
+            self.log_box.append(f"📂 선택됨: {path}")
+            self.show_preview(path)
 
-        if not file_path:
+    # 이미지/영상 미리보기 (원본 기준)
+    def show_preview(self, path: str):
+        # 이미지 미리보기
+        if path.lower().endswith((".jpg", ".jpeg", ".png")):
+            pixmap = QPixmap(path)
+            if not pixmap.isNull():
+                self.previewLabel.setPixmap(
+                    pixmap.scaled(
+                        self.previewLabel.width(),
+                        self.previewLabel.height(),
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation
+                    )
+                )
             return
 
-        self.media_path = file_path
-        self.path_label.setText(f"📂 선택된 파일: {file_path}")
+        # 영상 → 첫 프레임 미리보기
+        cap = cv2.VideoCapture(path)
+        ok, frame = cap.read()
+        cap.release()
 
-        ext = os.path.splitext(file_path)[1].lower()
+        if ok:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = frame.shape
+            qimg = QImage(frame.data, w, h, w * ch, QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimg)
 
-        if ext in [".jpg", ".jpeg", ".png", ".bmp"]:
-            self.media_player.stop()
-            self.video_widget.hide()
-            self.image_preview.show()
+            self.previewLabel.setPixmap(
+                pixmap.scaled(
+                    self.previewLabel.width(),
+                    self.previewLabel.height(),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation
+                )
+            )
 
-            pix = QPixmap(file_path)
-            self.image_preview.setPixmap(pix)
-
-        else:
-            # 영상
-            self.image_preview.hide()
-            self.video_widget.show()
-
-            self.media_player.setSource(QUrl.fromLocalFile(os.path.abspath(file_path)))
-            self.media_player.play()
-
-    # ---------------------------
-    # 최신 생성 파일 찾기
-    # ---------------------------
-    def get_latest(self, folder, extensions):
-        if not os.path.isdir(folder):
-            return None
-
-        files = [
-            os.path.join(folder, f)
-            for f in os.listdir(folder)
-            if f.lower().endswith(extensions)
-        ]
-        if not files:
-            return None
-
-        return max(files, key=os.path.getmtime)
-
-    # ---------------------------
-    # Predict 실행
-    # ---------------------------
+    # =======================================================
+    # 🔥 추론 실행 → 실시간 결과 미리보기 + 파일 저장
+    # =======================================================
     def run_predict(self):
-        if not self.media_path:
+        if not self.selected_path:
+            self.log_box.append("❌ 먼저 파일을 선택해주세요.")
             return
 
-        model_name = self.model_combo.currentText()
-        if model_name == "(모델 없음)":
+        model_file = self.model_combo.currentText()
+        if not model_file:
+            self.log_box.append("❌ 사용할 모델이 없습니다.")
             return
 
-        model_path = os.path.join(self.models_dir, model_name)
-        model = YOLO(model_path)
+        model_path = os.path.join(self.paths["models_dir"], model_file)
+
+        # Confidence 값 (0.0 ~ 1.0)
+        conf_percent = self.conf_slider.value()
+        conf = conf_percent / 100.0
+
+        # 결과 저장 경로
+        timestamp = datetime.datetime.now().strftime("%y%m%d_%H%M")
+        save_root = self.paths.get("predict_output_dir", "C:/yolo_data/predict_output")
+        os.makedirs(save_root, exist_ok=True)
+        save_dir = os.path.join(save_root, timestamp)
+        os.makedirs(save_dir, exist_ok=True)
+
+        self.log_box.append(f"⚙ Confidence: {conf_percent}% 이상만 박스 표시")
+        self.log_box.append(f"📁 저장 경로: {save_dir}")
 
         if self.overlay:
-            self.overlay.show_overlay("🔮 추론 중...")
+            self.overlay.show_overlay("🔍 추론 중...")
 
-        ext = os.path.splitext(self.media_path)[1].lower()
+        # Worker 실행
+        self.worker = PredictWorker(
+            model_path=model_path,
+            source_path=self.selected_path,
+            save_dir=save_dir,
+            conf=conf,
+        )
+        self.worker.frame_ready.connect(self.update_preview)
+        self.worker.finished_ok.connect(self.predict_finished)
+        self.worker.start()
 
-        try:
-            # ---------------------------
-            # 이미지 예측
-            # ---------------------------
-            if ext in [".jpg", ".jpeg", ".png", ".bmp"]:
-                out_dir = os.path.join(self.predict_output, "img_out")
-                os.makedirs(out_dir, exist_ok=True)
+    # 실시간 프레임 업데이트 (YOLO 결과)
+    def update_preview(self, frame):
+        # YOLO plot() 결과는 BGR이므로 RGB로 변환 후 표시
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = frame.shape
+        qimg = QImage(frame.data, w, h, w * ch, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimg)
 
-                model.predict(
-                    self.media_path,
-                    save=True,
-                    project=out_dir,
-                    name="result",
-                    exist_ok=True
-                )
+        self.previewLabel.setPixmap(
+            pixmap.scaled(
+                self.previewLabel.width(),
+                self.previewLabel.height(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+        )
 
-                result_dir = os.path.join(out_dir, "result")
-                latest = self.get_latest(result_dir, (".jpg", ".png"))
-
-                if latest:
-                    self.video_widget.hide()
-                    self.image_preview.show()
-
-                    pix = QPixmap(latest)
-                    self.image_preview.setPixmap(pix)
-
-            # ---------------------------
-            # 영상 예측
-            # ---------------------------
-            else:
-                out_dir = os.path.join(self.predict_output, "video_out")
-                os.makedirs(out_dir, exist_ok=True)
-
-                model.predict(
-                    self.media_path,
-                    save=True,
-                    project=out_dir,
-                    name="result",
-                    exist_ok=True
-                )
-
-                result_dir = os.path.join(out_dir, "result")
-                latest = self.get_latest(result_dir, (".mp4", ".avi", ".mov"))
-
-                if latest:
-                    self.image_preview.hide()
-                    self.video_widget.show()
-
-                    self.media_player.setSource(QUrl.fromLocalFile(os.path.abspath(latest)))
-                    self.media_player.play()
-
-        finally:
-            if self.overlay:
-                self.overlay.hide_overlay()
+    def predict_finished(self, save_dir):
+        self.log_box.append(f"✔ 결과 저장 완료: {save_dir}")
+        if self.overlay:
+            self.overlay.hide_overlay()

@@ -19,13 +19,13 @@ class LoadingOverlay(QWidget):
         self.gif_label = QLabel()
         self.gif_label.setAlignment(Qt.AlignCenter)
 
-        gif_path = os.path.abspath("resources/hamtory.gif")
+        gif_path = os.path.abspath("resources/fast-run.gif")
         if os.path.exists(gif_path):
             self.movie = QMovie(gif_path)
             self.movie.setScaledSize(QSize(120, 120))  # 크기 줄이기
             self.gif_label.setMovie(self.movie)
         else:
-            self.gif_label.setText("hamtory.gif 없음")
+            self.gif_label.setText("fast-run.gif 없음")
 
         # 텍스트
         self.text_label = QLabel("작업 중...")

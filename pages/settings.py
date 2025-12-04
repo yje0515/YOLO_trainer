@@ -23,8 +23,25 @@ SETTINGS_PATH = "config/settings.json"
 def load_settings():
     if os.path.exists(SETTINGS_PATH):
         with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return DEFAULT_SETTINGS.copy()
+            settings = json.load(f)
+    else:
+        settings = DEFAULT_SETTINGS.copy()
+
+    # -----------------------------
+    # 🔥 predict_dir 기본값 보정 추가
+    # -----------------------------
+    # 기존에 저장된 키는 predict_output_dir
+    # Predict 탭 코드에서 요구하는 키는 predict_dir
+    # 둘을 자동 매핑해서 KeyError 제거
+    if "predict_dir" not in settings:
+        settings["predict_dir"] = settings.get(
+            "predict_output_dir",
+            "C:/yolo_data/predict_output"
+        )
+    # -----------------------------
+
+    return settings
+
 
 
 def save_settings(data: dict):

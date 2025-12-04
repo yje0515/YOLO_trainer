@@ -2,12 +2,11 @@ import os
 import shutil
 import json
 import datetime
-import csv
 import sys
 import io
 import time
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, Signal, Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton,
     QHBoxLayout, QComboBox, QLineEdit, QFileDialog, QTextEdit
@@ -20,9 +19,8 @@ from ultralytics import YOLO
 #   학습 Worker Thread
 # ============================
 class TrainWorker(QThread):
-    log_signal = Signal(str)        # 로그 출력
-    finished_ok = Signal(str)       # best.pt 경로 전달
-    stopped = Signal()              # 중단 시그널
+    log_signal = Signal(str)
+    finished_ok = Signal(str)
 
     def __init__(self, model_name, data_yaml, epochs, patience, paths: dict):
         super().__init__()
@@ -31,10 +29,6 @@ class TrainWorker(QThread):
         self.epochs = epochs
         self.patience = patience
         self.paths = paths
-        self.stop_flag = False
-
-    def stop(self):
-        self.stop_flag = True
 
     def run(self):
         timestamp = datetime.datetime.now().strftime("%y%m%d_%H%M")
@@ -47,10 +41,11 @@ class TrainWorker(QThread):
         os.makedirs(models_dir, exist_ok=True)
         os.makedirs(history_dir, exist_ok=True)
 
+        # 시작 로그
         self.log_signal.emit(f"🧪 학습 시작 ({timestamp})")
         self.log_signal.emit(f"data.yaml: {self.data_yaml}")
 
-        # ----- stdout redirect -----
+        # stdout redirect
         class Redirect(io.TextIOBase):
             def __init__(self, callback):
                 self.callback = callback
@@ -70,11 +65,11 @@ class TrainWorker(QThread):
                     self.callback(self.buffer.strip())
                     self.buffer = ""
 
-        old_stdout = sys.stdout
-        old_stderr = sys.stderr
+        old_stdout, old_stderr = sys.stdout, sys.stderr
         sys.stdout = Redirect(self.log_signal.emit)
         sys.stderr = Redirect(self.log_signal.emit)
 
+        # Device check
         try:
             import torch
             device = "0" if torch.cuda.is_available() else "cpu"
@@ -83,15 +78,13 @@ class TrainWorker(QThread):
             device = "cpu"
             self.log_signal.emit("CUDA 체크 실패 → CPU 사용")
 
+        start_time = time.time()
+
         model = YOLO(self.model_name)
 
-        # ----- STOP 체크를 위한 콜백 추가 -----
-        def callback(trainer):
-            if self.stop_flag:
-                trainer.stop = True
-                self.log_signal.emit("🛑 학습 중지 신호 감지 → 종료 중...")
-                time.sleep(0.3)
-
+        # -------------------------------
+        # 반드시 save=True 해야 YOLO8 CSV 생성됨
+        # -------------------------------
         try:
             results = model.train(
                 data=self.data_yaml,
@@ -102,31 +95,65 @@ class TrainWorker(QThread):
                 device=device,
                 project=runs_dir,
                 name=f"train_{timestamp}",
-                exist_ok=True,
-                callbacks={"on_train_epoch_end": callback}
+                save=True,                 # 🔥 핵심
+                exist_ok=True
             )
         except Exception as e:
             self.log_signal.emit(f"❌ 학습 실패: {e}")
+            sys.stdout, sys.stderr = old_stdout, old_stderr
             return
         finally:
-            sys.stdout = old_stdout
-            sys.stderr = old_stderr
+            sys.stdout, sys.stderr = old_stdout, old_stderr
 
-        if self.stop_flag:
-            self.stopped.emit()
-            return
+        # -------------------------------
+        # mAP50 가져오기 (YOLO8 + YOLO11)
+        # -------------------------------
+        def get_map50(res):
+            # YOLO11 구조
+            try:
+                if hasattr(res.metrics, "map50"):
+                    return float(res.metrics.map50)
+            except:
+                pass
 
-        # 학습 로그 저장 폴더
+            # YOLO8 구조
+            try:
+                if hasattr(res.metrics, "box"):
+                    return float(res.metrics.box.map50)
+            except:
+                pass
+
+            # results_dict 구조
+            try:
+                d = res.results_dict
+                # YOLO8 CSV에서의 key
+                if "metrics/mAP50(B)" in d:
+                    return float(d["metrics/mAP50(B)"])
+            except:
+                pass
+
+            return None
+
+        map50 = get_map50(results)
+        if map50:
+            self.log_signal.emit(f"✔ mAP50: {map50:.4f}")
+        else:
+            self.log_signal.emit("⚠ mAP50 찾지 못함 (YOLO 버전 차이 가능)")
+
+        # -------------------------------
+        # 학습 시간
+        # -------------------------------
+        train_time_sec = time.time() - start_time
+
+        # -------------------------------
+        # 파일 저장
+        # -------------------------------
         run_dir = os.path.join(runs_dir, f"train_{timestamp}")
         best_src = os.path.join(run_dir, "weights", "best.pt")
 
-        if not os.path.exists(best_src):
-            self.log_signal.emit("⚠ best.pt를 찾을 수 없습니다.")
-            return
-
-        # 모델 저장
         best_name = f"best_{timestamp}.pt"
         best_dst = os.path.join(models_dir, best_name)
+
         shutil.copy(best_src, best_dst)
 
         # history 저장
@@ -134,6 +161,9 @@ class TrainWorker(QThread):
         os.makedirs(hist_dir, exist_ok=True)
         shutil.copy(best_src, os.path.join(hist_dir, "best.pt"))
 
+        # -------------------------------
+        # metadata.json 저장
+        # -------------------------------
         meta = {
             "timestamp": timestamp,
             "data_yaml": self.data_yaml,
@@ -141,7 +171,9 @@ class TrainWorker(QThread):
             "epochs": self.epochs,
             "patience": self.patience,
             "models_file": best_dst,
-            "run_dir": run_dir
+            "run_dir": run_dir,
+            "train_time_sec": train_time_sec,
+            "map50": map50
         }
 
         with open(os.path.join(hist_dir, "metadata.json"), "w", encoding="utf-8") as f:
@@ -160,7 +192,6 @@ class TrainPage(QWidget):
     def __init__(self, settings: dict):
         super().__init__()
         self.overlay = None
-        self.worker = None
         self.data_yaml = None
         self.update_paths(settings)
 
@@ -171,7 +202,7 @@ class TrainPage(QWidget):
         title.setStyleSheet("font-size:18px; font-weight:bold;")
         layout.addWidget(title)
 
-        # 선택된 데이터셋 표시
+        # 데이터셋 표시
         self.dataset_label = QLabel("📂 data.yaml 선택되지 않음")
         layout.addWidget(self.dataset_label)
 
@@ -182,37 +213,38 @@ class TrainPage(QWidget):
         # 모델 선택
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("YOLO 모델 선택하기 :"))
+
         self.model_combo = QComboBox()
-        self.model_combo.addItems(["yolov8n.pt", "yolov8s.pt", "yolov8m.pt"])
+        models = [
+            "yolov8n.pt", "yolov8s.pt", "yolov8m.pt",
+            "yolo11n.pt", "yolo11s.pt", "yolo11m.pt"
+        ]
+        for m in models:
+            self.model_combo.addItem(m)
+
         row1.addWidget(self.model_combo)
         layout.addLayout(row1)
 
-        # Epoch
+        # epochs
         row2 = QHBoxLayout()
         row2.addWidget(QLabel("Epochs:"))
         self.epoch_input = QLineEdit("30")
         row2.addWidget(self.epoch_input)
         layout.addLayout(row2)
 
-        # Patience
+        # patience
         row3 = QHBoxLayout()
         row3.addWidget(QLabel("Patience:"))
-        self.pat_input = QLineEdit("10")
-        row3.addWidget(self.pat_input)
+        self.patience_input = QLineEdit("10")
+        row3.addWidget(self.patience_input)
         layout.addLayout(row3)
 
-        # 버튼
-        row4 = QHBoxLayout()
+        # start button
         self.btn_start = QPushButton("🚀 학습 시작")
-        self.btn_stop = QPushButton("🛑 학습 중단")
-        self.btn_stop.setEnabled(False)
         self.btn_start.clicked.connect(self.start_training)
-        self.btn_stop.clicked.connect(self.stop_training)
-        row4.addWidget(self.btn_start)
-        row4.addWidget(self.btn_stop)
-        layout.addLayout(row4)
+        layout.addWidget(self.btn_start)
 
-        # 로그창
+        # log 출력창
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.setStyleSheet("font-family:Consolas; font-size:12px;")
@@ -241,11 +273,10 @@ class TrainPage(QWidget):
             return
 
         epochs = int(self.epoch_input.text())
-        patience = int(self.pat_input.text())
+        patience = int(self.patience_input.text())
         model_name = self.model_combo.currentText()
 
         self.btn_start.setEnabled(False)
-        self.btn_stop.setEnabled(True)
 
         if self.overlay:
             self.overlay.show_overlay("🧪 모델 학습 중...")
@@ -254,24 +285,13 @@ class TrainPage(QWidget):
         self.worker.log_signal.connect(self.log_box.append)
         self.worker.finished_ok.connect(self.on_model_saved)
         self.worker.finished.connect(self.training_done)
-        self.worker.stopped.connect(self.training_stopped)
 
         self.worker.start()
-
-    def stop_training(self):
-        if self.worker:
-            self.log_box.append("🛑 사용자 중지 요청...")
-            self.worker.stop()
-
-    def training_stopped(self):
-        self.log_box.append("🛑 학습이 중단되었습니다.")
-        self.training_done()
 
     def training_done(self):
         if self.overlay:
             self.overlay.hide_overlay()
         self.btn_start.setEnabled(True)
-        self.btn_stop.setEnabled(False)
         self.log_box.append("=== 학습 종료 ===")
 
     def on_model_saved(self, path: str):
