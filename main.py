@@ -5,7 +5,6 @@ from PySide6.QtWidgets import (
 )
 
 from pages.dashboard import DashboardPage
-    # 경로 반영하기 전체 페이지 업데이트
 from pages.dataset import DatasetPage
 from pages.train import TrainPage
 from pages.predict import PredictPage
@@ -78,7 +77,7 @@ class MainWindow(QWidget):
         # -----------------------------
         self.overlay = LoadingOverlay(self)
 
-        # overlay 전달 (Dataset, Train, Predict 페이지 필요)
+        # overlay 전달
         if hasattr(self.page_dataset, "set_overlay"):
             self.page_dataset.set_overlay(self.overlay)
 
@@ -104,7 +103,7 @@ class MainWindow(QWidget):
             self.page_train.model_saved_signal.connect(self.page_predict.refresh_model_list)
             self.page_train.model_saved_signal.connect(self.page_history.reload_history)
 
-        # 기본 페이지
+        # 기본 페이지: Dashboard
         self.stack.setCurrentIndex(0)
 
     # ---------------------------------------------------------

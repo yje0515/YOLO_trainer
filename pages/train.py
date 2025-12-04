@@ -15,20 +15,54 @@ from PySide6.QtWidgets import (
 from ultralytics import YOLO
 
 
-# ============================
-#   학습 Worker Thread
-# ============================
+# ======================================================
+# 🔥 데이터셋 자동 판별 (fire / human)
+# ======================================================
+def detect_dataset_from_yaml(yaml_path: str) -> str:
+    """
+    data.yaml 내부의 폴더명을 기준으로 데이터셋을 자동 판별
+      - fire → train/val 경로에 fire 문자열 포함
+      - human → human 문자열 포함
+    기본값: unknown
+    """
+    if not os.path.isfile(yaml_path):
+        return "unknown"
+
+    try:
+        import yaml
+        with open(yaml_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+
+        train_path = str(data.get("train", "")).lower()
+        val_path = str(data.get("val", "")).lower()
+        text = train_path + " " + val_path
+
+        if "fire" in text:
+            return "fire"
+        if "human" in text:
+            return "human"
+
+    except Exception:
+        pass
+
+    return "unknown"
+
+
+# ======================================================
+# 학습 Worker Thread
+# ======================================================
 class TrainWorker(QThread):
     log_signal = Signal(str)
     finished_ok = Signal(str)
 
-    def __init__(self, model_name, data_yaml, epochs, patience, paths: dict):
+    def __init__(self, model_name, data_yaml, epochs, patience, paths: dict, dataset_name="unknown"):
         super().__init__()
         self.model_name = model_name
         self.data_yaml = data_yaml
         self.epochs = epochs
         self.patience = patience
         self.paths = paths
+        self.dataset_name = dataset_name   # fire / human / unknown
 
     def run(self):
         timestamp = datetime.datetime.now().strftime("%y%m%d_%H%M")
@@ -41,9 +75,12 @@ class TrainWorker(QThread):
         os.makedirs(models_dir, exist_ok=True)
         os.makedirs(history_dir, exist_ok=True)
 
-        # 시작 로그
+        # -------------------------
+        # 로그 시작
+        # -------------------------
         self.log_signal.emit(f"🧪 학습 시작 ({timestamp})")
         self.log_signal.emit(f"data.yaml: {self.data_yaml}")
+        self.log_signal.emit(f"dataset 자동 감지: {self.dataset_name}")
 
         # stdout redirect
         class Redirect(io.TextIOBase):
@@ -69,7 +106,9 @@ class TrainWorker(QThread):
         sys.stdout = Redirect(self.log_signal.emit)
         sys.stderr = Redirect(self.log_signal.emit)
 
-        # Device check
+        # -------------------------
+        # Device
+        # -------------------------
         try:
             import torch
             device = "0" if torch.cuda.is_available() else "cpu"
@@ -78,13 +117,13 @@ class TrainWorker(QThread):
             device = "cpu"
             self.log_signal.emit("CUDA 체크 실패 → CPU 사용")
 
+        # -------------------------
+        # Train 실행
+        # -------------------------
         start_time = time.time()
 
         model = YOLO(self.model_name)
 
-        # -------------------------------
-        # 반드시 save=True 해야 YOLO8 CSV 생성됨
-        # -------------------------------
         try:
             results = model.train(
                 data=self.data_yaml,
@@ -95,7 +134,7 @@ class TrainWorker(QThread):
                 device=device,
                 project=runs_dir,
                 name=f"train_{timestamp}",
-                save=True,                 # 🔥 핵심
+                save=True,
                 exist_ok=True
             )
         except Exception as e:
@@ -105,49 +144,42 @@ class TrainWorker(QThread):
         finally:
             sys.stdout, sys.stderr = old_stdout, old_stderr
 
-        # -------------------------------
-        # mAP50 가져오기 (YOLO8 + YOLO11)
-        # -------------------------------
+        # -------------------------
+        # mAP50 계산
+        # -------------------------
         def get_map50(res):
-            # YOLO11 구조
             try:
                 if hasattr(res.metrics, "map50"):
                     return float(res.metrics.map50)
             except:
                 pass
-
-            # YOLO8 구조
             try:
                 if hasattr(res.metrics, "box"):
                     return float(res.metrics.box.map50)
             except:
                 pass
-
-            # results_dict 구조
             try:
                 d = res.results_dict
-                # YOLO8 CSV에서의 key
                 if "metrics/mAP50(B)" in d:
                     return float(d["metrics/mAP50(B)"])
             except:
                 pass
-
             return None
 
         map50 = get_map50(results)
         if map50:
             self.log_signal.emit(f"✔ mAP50: {map50:.4f}")
         else:
-            self.log_signal.emit("⚠ mAP50 찾지 못함 (YOLO 버전 차이 가능)")
+            self.log_signal.emit("⚠ mAP50 찾지 못함")
 
-        # -------------------------------
-        # 학습 시간
-        # -------------------------------
+        # -------------------------
+        # 시간 계산
+        # -------------------------
         train_time_sec = time.time() - start_time
 
-        # -------------------------------
-        # 파일 저장
-        # -------------------------------
+        # -------------------------
+        # Best 모델 저장
+        # -------------------------
         run_dir = os.path.join(runs_dir, f"train_{timestamp}")
         best_src = os.path.join(run_dir, "weights", "best.pt")
 
@@ -156,17 +188,20 @@ class TrainWorker(QThread):
 
         shutil.copy(best_src, best_dst)
 
-        # history 저장
+        # -------------------------
+        # history/{timestamp}/ 저장
+        # -------------------------
         hist_dir = os.path.join(history_dir, timestamp)
         os.makedirs(hist_dir, exist_ok=True)
         shutil.copy(best_src, os.path.join(hist_dir, "best.pt"))
 
-        # -------------------------------
+        # -------------------------
         # metadata.json 저장
-        # -------------------------------
+        # -------------------------
         meta = {
             "timestamp": timestamp,
             "data_yaml": self.data_yaml,
+            "dataset": self.dataset_name,     # fire / human / unknown
             "base_model": self.model_name,
             "epochs": self.epochs,
             "patience": self.patience,
@@ -183,9 +218,9 @@ class TrainWorker(QThread):
         self.finished_ok.emit(best_dst)
 
 
-# ============================
-#   Train Page (UI)
-# ============================
+# ======================================================
+# Train Page UI
+# ======================================================
 class TrainPage(QWidget):
     model_saved_signal = Signal(str)
 
@@ -193,6 +228,7 @@ class TrainPage(QWidget):
         super().__init__()
         self.overlay = None
         self.data_yaml = None
+        self.dataset_name = "unknown"
         self.update_paths(settings)
 
         layout = QVBoxLayout(self)
@@ -202,7 +238,7 @@ class TrainPage(QWidget):
         title.setStyleSheet("font-size:18px; font-weight:bold;")
         layout.addWidget(title)
 
-        # 데이터셋 표시
+        # data.yaml 표시
         self.dataset_label = QLabel("📂 data.yaml 선택되지 않음")
         layout.addWidget(self.dataset_label)
 
@@ -213,15 +249,12 @@ class TrainPage(QWidget):
         # 모델 선택
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("YOLO 모델 선택하기 :"))
-
         self.model_combo = QComboBox()
-        models = [
+        for m in [
             "yolov8n.pt", "yolov8s.pt", "yolov8m.pt",
             "yolo11n.pt", "yolo11s.pt", "yolo11m.pt"
-        ]
-        for m in models:
+        ]:
             self.model_combo.addItem(m)
-
         row1.addWidget(self.model_combo)
         layout.addLayout(row1)
 
@@ -244,7 +277,7 @@ class TrainPage(QWidget):
         self.btn_start.clicked.connect(self.start_training)
         layout.addWidget(self.btn_start)
 
-        # log 출력창
+        # 로그
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.setStyleSheet("font-family:Consolas; font-size:12px;")
@@ -258,12 +291,16 @@ class TrainPage(QWidget):
     def update_paths(self, settings: dict):
         self.paths = settings
 
+    # Dataset 선택 (DatasetPage에서 signal로도 들어오고, 직접 선택도 가능)
     def set_dataset_path(self, path: str):
         self.data_yaml = path
-        self.dataset_label.setText(f"📂 선택된 데이터셋 data.yaml: {path}")
+        self.dataset_label.setText(f"📂 선택된 data.yaml: {path}")
+        self.dataset_name = detect_dataset_from_yaml(path)
 
     def select_dataset(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select data.yaml", ".", "YAML (*.yaml)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select data.yaml", ".", "YAML (*.yaml)"
+        )
         if path:
             self.set_dataset_path(path)
 
@@ -281,7 +318,14 @@ class TrainPage(QWidget):
         if self.overlay:
             self.overlay.show_overlay("🧪 모델 학습 중...")
 
-        self.worker = TrainWorker(model_name, self.data_yaml, epochs, patience, self.paths)
+        self.worker = TrainWorker(
+            model_name,
+            self.data_yaml,
+            epochs,
+            patience,
+            self.paths,
+            dataset_name=self.dataset_name
+        )
         self.worker.log_signal.connect(self.log_box.append)
         self.worker.finished_ok.connect(self.on_model_saved)
         self.worker.finished.connect(self.training_done)
