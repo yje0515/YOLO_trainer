@@ -5,14 +5,38 @@ import datetime
 import sys
 import io
 import time
+import re  # 🔥 Epoch 로그 파싱용
 
 from PySide6.QtCore import QThread, Signal, Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton,
-    QHBoxLayout, QComboBox, QLineEdit, QFileDialog, QTextEdit
+    QHBoxLayout, QComboBox, QLineEdit, QFileDialog,
+    QTextEdit, QProgressBar
 )
 
 from ultralytics import YOLO
+
+
+# ======================================================
+# 🔧 시간 포맷 헬퍼 (mm:ss / hh:mm:ss)
+# ======================================================
+def format_time(sec: float | int | None) -> str:
+    if sec is None:
+        return "-"
+    try:
+        sec = float(sec)
+    except Exception:
+        return "-"
+    if sec < 0:
+        sec = 0
+    sec = int(sec)
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    s = sec % 60
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    else:
+        return f"{m:02d}:{s:02d}"
 
 
 # ======================================================
@@ -56,6 +80,10 @@ class TrainWorker(QThread):
     log_signal = Signal(str)
     finished_ok = Signal(str)
 
+    # 🔥 추가: 진행 상황 실시간 전파
+    # elapsed_sec, expected_total_sec, current_epoch, total_epochs
+    progress_signal = Signal(float, float, int, int)
+
     def __init__(self, model_name, data_yaml, epochs, patience, paths: dict, dataset_name="unknown"):
         super().__init__()
         self.model_name = model_name
@@ -64,6 +92,106 @@ class TrainWorker(QThread):
         self.patience = patience
         self.paths = paths
         self.dataset_name = dataset_name   # fire / human / etc / unknown
+
+        # ---- 진행률/ETA 계산용 내부 상태 ----
+        self._start_time: float | None = None        # 학습 전체 시작 시각
+        self._prepare_end_time: float | None = None  # 이미지 스캔/준비 끝난 시각 (Epoch 1 시작 근처)
+        self._epoch1_end_time: float | None = None   # Epoch 1 종료 시각 (Epoch 2 로그 등장 시점)
+        self._expected_total_time: float | None = None  # 예상 총 학습시간 (초)
+        self._first_epoch_seen_time: float | None = None
+        self.current_epoch: int = 0
+        self.total_epochs: int = epochs
+
+    # --------------------------------------------------
+    # 🔥 로그 한 줄이 들어올 때마다 호출되는 헬퍼
+    #   - Epoch 파싱
+    #   - 준비/1에포크 시간 측정
+    #   - 예상 총 학습시간 계산
+    #   - 진행률 시그널 전송
+    # --------------------------------------------------
+    def _handle_log_line(self, line: str):
+        now = time.time()
+
+        # 최초 로그 시각 = 전체 학습 시작 시각으로 사용
+        if self._start_time is None:
+            self._start_time = now
+
+        # "  1/30 " 이런 형식의 Epoch 로그 파싱
+        m = re.search(r"^\s*(\d+)/(\d+)\s", line)
+        if m:
+            ep = int(m.group(1))
+            total = int(m.group(2))
+            # 총 Epoch 정보 업데이트 (YOLO 설정과 다를 일은 거의 없지만 방어용)
+            if total > 0:
+                self.total_epochs = total
+
+            # 현재 Epoch 갱신 (뒤에서 진행률 계산에 사용)
+            if ep > self.current_epoch:
+                self.current_epoch = ep
+
+            # Epoch 1이 처음 보이는 시점 = 준비 끝/학습 시작 지점으로 간주
+            if ep == 1 and self._first_epoch_seen_time is None:
+                self._first_epoch_seen_time = now
+                if self._prepare_end_time is None:
+                    self._prepare_end_time = now
+
+            # Epoch 2 이상이 처음 보이는 시점 = Epoch 1 종료 시점으로 간주
+            if ep >= 2 and self._epoch1_end_time is None:
+                self._epoch1_end_time = now
+                # 혹시라도 prepare_end_time이 비어있다면 첫 epoch 등장 시각 기준으로 보정
+                if self._prepare_end_time is None:
+                    self._prepare_end_time = self._first_epoch_seen_time or self._start_time or now
+
+                # 🔥 예상 총 학습시간 계산 (보수적으로)
+                if self._start_time is not None and self._prepare_end_time is not None:
+                    t_prepare = self._prepare_end_time - self._start_time
+                else:
+                    t_prepare = 0.0
+                t_epoch1 = self._epoch1_end_time - (self._prepare_end_time or self._start_time or self._epoch1_end_time)
+
+                # 기본 공식: 준비시간 + (1 Epoch 순수 학습시간 × 총 Epoch 수)
+                expected_total = t_prepare + max(t_epoch1, 0.1) * self.total_epochs
+                self._expected_total_time = expected_total
+
+                # 로그에 한 번 안내
+                self.log_signal.emit(
+                    f"⏳ 1에포크 기준 예상 총 학습시간: 약 {format_time(expected_total)}"
+                )
+
+        # 매 로그마다 진행률 업데이트
+        self._emit_progress(now)
+
+    # --------------------------------------------------
+    # 🔥 진행률/ETA 시그널 발행
+    # --------------------------------------------------
+    def _emit_progress(self, now: float | None = None, force_done: bool = False):
+        if now is None:
+            now = time.time()
+        if self._start_time is None:
+            return
+
+        elapsed = now - self._start_time
+        expected = self._expected_total_time
+
+        # 학습이 모두 끝난 뒤 post-processing 중일 때 강제로 100% 맞춰주기
+        if force_done:
+            if expected is None or expected < elapsed:
+                expected = elapsed
+            self._expected_total_time = expected
+
+        # 예상 시간이 아직 없으면, Epoch 비율로만 대략 진행률 표시
+        if not expected or expected <= 0:
+            if self.total_epochs > 0:
+                frac = min(1.0, self.current_epoch / float(self.total_epochs))
+                progress = int(frac * 100)
+            else:
+                progress = 0
+            expected = 0.0
+        else:
+            progress = int(min(100, (elapsed / expected) * 100))
+
+        # UI 쪽에서 퍼센트는 다시 계산할 수 있게, 여기선 시간/epoch 정보만 보냄
+        self.progress_signal.emit(elapsed, expected, self.current_epoch, self.total_epochs)
 
     def run(self):
         timestamp = datetime.datetime.now().strftime("%y%m%d_%H%M")
@@ -85,27 +213,32 @@ class TrainWorker(QThread):
 
         # stdout redirect
         class Redirect(io.TextIOBase):
-            def __init__(self, callback):
+            def __init__(self, callback, owner: "TrainWorker"):
                 self.callback = callback
                 self.buffer = ""
+                self.owner = owner
 
             def write(self, text):
                 self.buffer += text
                 while "\n" in self.buffer:
                     line, self.buffer = self.buffer.split("\n", 1)
-                    line = line.strip()
-                    if line:
-                        self.callback(line)
+                    line = line.rstrip("\r")
+                    if line.strip():
+                        # 1) 로그 출력
+                        self.callback(line.strip())
+                        # 2) ETA/진행률 갱신
+                        self.owner._handle_log_line(line.strip())
                 return len(text)
 
             def flush(self):
-                if self.buffer:
+                if self.buffer.strip():
                     self.callback(self.buffer.strip())
+                    self.owner._handle_log_line(self.buffer.strip())
                     self.buffer = ""
 
         old_stdout, old_stderr = sys.stdout, sys.stderr
-        sys.stdout = Redirect(self.log_signal.emit)
-        sys.stderr = Redirect(self.log_signal.emit)
+        sys.stdout = Redirect(self.log_signal.emit, self)
+        sys.stderr = Redirect(self.log_signal.emit, self)
 
         # -------------------------
         # Device
@@ -122,6 +255,7 @@ class TrainWorker(QThread):
         # Train 실행
         # -------------------------
         start_time = time.time()
+        self._start_time = start_time  # 진행률 계산에 사용
 
         model = YOLO(self.model_name)
 
@@ -144,6 +278,10 @@ class TrainWorker(QThread):
             return
         finally:
             sys.stdout, sys.stderr = old_stdout, old_stderr
+
+        # 🔥 학습 루프는 끝났지만, 아직 파일 복사/메타 저장 작업이 남아있으므로
+        # 여기서 한 번 더 "100% 근처"로 진행률 보정
+        self._emit_progress(now=time.time(), force_done=True)
 
         # -------------------------
         # mAP50 계산
@@ -176,7 +314,8 @@ class TrainWorker(QThread):
         # -------------------------
         # 시간 계산
         # -------------------------
-        train_time_sec = time.time() - start_time
+        end_time = time.time()
+        train_time_sec = end_time - start_time
 
         # -------------------------
         # Best 모델 저장
@@ -216,6 +355,7 @@ class TrainWorker(QThread):
             json.dump(meta, f, indent=4, ensure_ascii=False)
 
         self.log_signal.emit(f"✔ 학습 완료 → {best_dst}")
+        self.log_signal.emit(f"⏱ 실제 학습 시간: {format_time(train_time_sec)}")
         self.finished_ok.emit(best_dst)
 
 
@@ -269,7 +409,7 @@ class TrainPage(QWidget):
         row1.addWidget(QLabel("YOLO 모델 선택하기 :"))
         self.model_combo = QComboBox()
         for m in [
-                        # ── Object Detection ──
+            # ── Object Detection ──
             "yolov8n.pt",
             "yolov8s.pt",
             "yolo11n.pt",
@@ -298,6 +438,16 @@ class TrainPage(QWidget):
         self.patience_input = QLineEdit("10")
         row3.addWidget(self.patience_input)
         layout.addLayout(row3)
+
+        # 🔥 진행률 ProgressBar + 상태 라벨
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        layout.addWidget(self.progress_bar)
+
+        self.progress_label = QLabel("진행률: 0%  |  경과 00:00 / 예상 -  (Epoch 0/0)")
+        self.progress_label.setStyleSheet("color:#555; font-size:12px;")
+        layout.addWidget(self.progress_label)
 
         # start button
         self.btn_start = QPushButton("🚀 학습 시작")
@@ -345,6 +495,27 @@ class TrainPage(QWidget):
         if path:
             self.set_dataset_path(path)
 
+    # --------------------------------------------------
+    # 🔥 진행률 업데이트 슬롯
+    # --------------------------------------------------
+    def on_progress_update(self, elapsed_sec: float, expected_sec: float, current_epoch: int, total_epochs: int):
+        # 퍼센트 계산
+        if expected_sec and expected_sec > 0:
+            progress = int(min(100, (elapsed_sec / expected_sec) * 100))
+        else:
+            if total_epochs > 0:
+                progress = int(min(100, (current_epoch / float(total_epochs)) * 100))
+            else:
+                progress = 0
+
+        self.progress_bar.setValue(progress)
+
+        self.progress_label.setText(
+            f"진행률: {progress}%  |  경과 {format_time(elapsed_sec)} / "
+            f"예상 {format_time(expected_sec if expected_sec > 0 else None)}  "
+            f"(Epoch {current_epoch}/{total_epochs})"
+        )
+
     def start_training(self):
         if not self.data_yaml:
             self.log_box.append("❌ data.yaml 선택 후 학습이 가능합니다.")
@@ -370,6 +541,10 @@ class TrainPage(QWidget):
 
         self.btn_start.setEnabled(False)
 
+        # 진행률 초기화
+        self.progress_bar.setValue(0)
+        self.progress_label.setText("진행률: 0%  |  경과 00:00 / 예상 -  (Epoch 0/0)")
+
         if self.overlay:
             self.overlay.show_overlay("🧪 모델 학습 중...")
 
@@ -384,6 +559,8 @@ class TrainPage(QWidget):
         self.worker.log_signal.connect(self.log_box.append)
         self.worker.finished_ok.connect(self.on_model_saved)
         self.worker.finished.connect(self.training_done)
+        # 🔥 진행률 연결
+        self.worker.progress_signal.connect(self.on_progress_update)
 
         self.worker.start()
 
@@ -392,6 +569,10 @@ class TrainPage(QWidget):
             self.overlay.hide_overlay()
         self.btn_start.setEnabled(True)
         self.log_box.append("=== 학습 종료 ===")
+
+        # 혹시 100%가 아니라면, 종료 시점에서 100%로 마무리
+        if self.progress_bar.value() < 100:
+            self.progress_bar.setValue(100)
 
     def on_model_saved(self, path: str):
         self.model_saved_signal.emit(path)
