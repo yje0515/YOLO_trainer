@@ -269,8 +269,17 @@ class TrainPage(QWidget):
         row1.addWidget(QLabel("YOLO 모델 선택하기 :"))
         self.model_combo = QComboBox()
         for m in [
-            "yolov8n.pt", "yolov8s.pt", "yolov8m.pt",
-            "yolo11n.pt", "yolo11s.pt", "yolo11m.pt"
+                        # ── Object Detection ──
+            "yolov8n.pt",
+            "yolov8s.pt",
+            "yolo11n.pt",
+            "yolo11s.pt",
+
+            # ── Pose 모델 ──
+            "yolov8n-pose.pt",
+            "yolov8s-pose.pt",
+            "yolo11n-pose.pt",
+            "yolo11s-pose.pt",
         ]:
             self.model_combo.addItem(m)
         row1.addWidget(self.model_combo)

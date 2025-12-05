@@ -56,7 +56,7 @@ class MainWindow(QWidget):
         # ⭐ 여기서 버튼 순서 + ModelList 추가
         self.btn_dashboard = QPushButton("🏠 Dashboard")
         self.btn_history = QPushButton("📚 History")
-        self.btn_model_comparison = QPushButton("📄 Model Comparison")  # ⭐ 추가됨
+        self.btn_model_comparison = QPushButton("📈 Model Graph")
         self.btn_dataset = QPushButton("📁 Dataset")
         self.btn_train = QPushButton("🧪 Train")
         self.btn_predict = QPushButton("🔍 Predict")
@@ -65,7 +65,7 @@ class MainWindow(QWidget):
         buttons = [
             self.btn_dashboard,     # index 0
             self.btn_history,       # index 1
-            self.btn_model_comparison,    # index 2 ⭐ 추가
+            self.btn_model_comparison,    # index 2
             self.btn_dataset,       # index 3
             self.btn_train,         # index 4
             self.btn_predict,       # index 5
@@ -129,6 +129,8 @@ class MainWindow(QWidget):
             self.page_train.model_saved_signal.connect(self.page_predict.refresh_model_list)
             self.page_train.model_saved_signal.connect(self.page_history.reload_history)
             self.page_train.model_saved_signal.connect(self.page_model_comparison.reload_models)  # ⭐ 모델리스트 갱신 추가
+            self.page_train.model_saved_signal.connect(self.page_dashboard.reload_data)
+            self.page_train.model_saved_signal.connect(self.page_dashboard.rebuild_ui)
 
         # 기본 페이지: Dashboard
         self.stack.setCurrentIndex(0)

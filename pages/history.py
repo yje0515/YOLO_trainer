@@ -4,7 +4,7 @@ import shutil
 import cv2
 import numpy as np
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap, QImage
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
@@ -36,13 +36,20 @@ class HistoryPage(QWidget):
         super().__init__()
         self.paths = settings
 
+        # 재생 관련 상태값
+        self.video_cap = None
+        self.video_timer = QTimer()
+        self.video_timer.timeout.connect(self._update_video_frame)
+
+        self.current_video_path = None
+
         self.all_entries: list[dict] = []
         self.filtered_entries: list[dict] = []
         self.page_size = 10
         self.current_page = 0
 
         # ===========================
-        # 메인 Splitter (좌/우)
+        # 메인 Splitter
         # ===========================
         main_split = QSplitter(self)
         main_split.setOrientation(Qt.Horizontal)
@@ -64,7 +71,7 @@ class HistoryPage(QWidget):
         filter_row.addWidget(QLabel("Dataset:"))
 
         self.dataset_combo = QComboBox()
-        self.dataset_combo.addItems(["전체", "fire", "human"])
+        self.dataset_combo.addItems(["전체", "fire", "human", "etc", "unknown"])
         self.dataset_combo.currentTextChanged.connect(self.apply_filter)
         filter_row.addWidget(self.dataset_combo)
 
@@ -76,9 +83,7 @@ class HistoryPage(QWidget):
 
         left_layout.addLayout(filter_row)
 
-        # ====================================
         # Train History Table
-        # ====================================
         self.table = QTableWidget()
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels([
@@ -90,12 +95,9 @@ class HistoryPage(QWidget):
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.cellClicked.connect(self.on_row_selected)
-
         left_layout.addWidget(self.table, stretch=2)
 
-        # ====================================
         # 페이징
-        # ====================================
         paging = QHBoxLayout()
         self.btn_prev = QPushButton("◀ 이전")
         self.btn_next = QPushButton("다음 ▶")
@@ -110,9 +112,7 @@ class HistoryPage(QWidget):
         paging.addWidget(self.page_label)
         left_layout.addLayout(paging)
 
-        # ====================================
         # 상세 metadata
-        # ====================================
         detail_title = QLabel("📄 상세 메타데이터")
         detail_title.setStyleSheet("font-weight:bold;")
         left_layout.addWidget(detail_title)
@@ -142,12 +142,11 @@ class HistoryPage(QWidget):
         right_title.setStyleSheet("font-size:16px; font-weight:bold;")
         right_layout.addWidget(right_title)
 
-        # 파일 리스트
         self.media_list = QListWidget()
         self.media_list.itemClicked.connect(self.on_media_selected)
         right_layout.addWidget(self.media_list, stretch=1)
 
-        # 미리보기
+        # PREVIEW AREA
         self.preview_label = QLabel("미리보기 없음")
         self.preview_label.setAlignment(Qt.AlignCenter)
         self.preview_label.setFixedHeight(300)
@@ -156,22 +155,32 @@ class HistoryPage(QWidget):
         )
         right_layout.addWidget(self.preview_label, stretch=1)
 
+        # ▶ / ■ 버튼 추가 (새 기능)
+        control_box = QHBoxLayout()
+        self.play_btn = QPushButton("▶ 재생")
+        self.stop_btn = QPushButton("■ 정지")
+
+        self.play_btn.clicked.connect(self.play_video)
+        self.stop_btn.clicked.connect(self.stop_video)
+
+        control_box.addWidget(self.play_btn)
+        control_box.addWidget(self.stop_btn)
+        control_box.addStretch()
+        right_layout.addLayout(control_box)
+
         # conf 표시
         self.conf_label = QLabel("conf: -")
         self.conf_label.setStyleSheet("color:#bbb;")
         right_layout.addWidget(self.conf_label)
 
-        # ===========================
-        # Splitter 배치
-        # ===========================
+        # Splitter
         main_split.addWidget(left_widget)
         main_split.addWidget(right_widget)
         main_split.setSizes([900, 400])
 
-        m = QVBoxLayout(self)
-        m.addWidget(main_split)
+        main_layout = QVBoxLayout(self)
+        main_layout.addWidget(main_split)
 
-        # 초기 로딩
         self.reload_history()
 
     # =========================================================
@@ -207,7 +216,6 @@ class HistoryPage(QWidget):
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
 
-                # 🔥 map50 cast to float
                 if "map50" in meta and meta["map50"] is not None:
                     try:
                         meta["map50"] = float(meta["map50"])
@@ -235,9 +243,7 @@ class HistoryPage(QWidget):
 
             self.all_entries.append(entry)
 
-        # 최신순 정렬
         self.all_entries.sort(key=lambda x: x["timestamp"], reverse=True)
-
         self.apply_filter()
 
     # =========================================================
@@ -265,10 +271,11 @@ class HistoryPage(QWidget):
         self.refresh_table()
 
     # =========================================================
-    # 테이블 리프레시
+    # Table Refresh
     # =========================================================
     def refresh_table(self):
         total = len(self.filtered_entries)
+
         if total == 0:
             self.table.setRowCount(0)
             self.page_label.setText("0 / 0 페이지")
@@ -348,15 +355,18 @@ class HistoryPage(QWidget):
     # Predict 결과 로드
     # =========================================================
     def load_predict_media(self, entry: dict):
+        # 영상 재생 중지
+        self.stop_video()
+
         self.media_list.clear()
         self.preview_label.setText("미리보기 없음")
         self.conf_label.setText("conf: -")
+        self.current_video_path = None
 
         predict_root = entry.get("predict_root")
         if not predict_root or not os.path.isdir(predict_root):
             return
 
-        # predict_log 내부 predict_* 폴더 탐색
         folders = sorted([
             f for f in os.listdir(predict_root)
             if f.startswith("predict_")
@@ -365,7 +375,6 @@ class HistoryPage(QWidget):
         for fold in folders:
             full_dir = os.path.join(predict_root, fold)
 
-            # 1) predict_metadata.json 읽기
             meta_file = os.path.join(full_dir, "predict_metadata.json")
             conf_str = "-"
 
@@ -379,7 +388,6 @@ class HistoryPage(QWidget):
                 except:
                     pass
 
-            # 2) media 폴더 탐색
             media_dir = os.path.join(full_dir, "media")
             if not os.path.isdir(media_dir):
                 continue
@@ -392,9 +400,11 @@ class HistoryPage(QWidget):
                     self.media_list.addItem(item)
 
     # =========================================================
-    # 미디어 미리보기
+    # 미디어 선택 시
     # =========================================================
     def on_media_selected(self, item: QListWidgetItem):
+        self.stop_video()
+
         path = item.data(Qt.UserRole)
         conf_info = item.data(Qt.UserRole + 1)
 
@@ -403,10 +413,16 @@ class HistoryPage(QWidget):
         if not path or not os.path.exists(path):
             return
 
+        self.current_video_path = path
         self.show_media_preview(path)
 
+    # =========================================================
+    # 이미지 + 영상 첫 프레임 미리보기
+    # =========================================================
     def show_media_preview(self, path: str):
-        # 이미지
+        self.stop_video()
+
+        # 이미지 처리
         if path.lower().endswith((".jpg", ".jpeg", ".png")):
             pixmap = QPixmap(path)
             if pixmap.isNull():
@@ -421,7 +437,7 @@ class HistoryPage(QWidget):
             )
             return
 
-        # 영상 → 첫 프레임
+        # 영상 처리: 첫 프레임만 표시
         cap = cv2.VideoCapture(path)
         ok, frame = cap.read()
         cap.release()
@@ -432,6 +448,60 @@ class HistoryPage(QWidget):
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = frame.shape
         qimg = QImage(frame.data, w, h, w * ch, QImage.Format_RGB888)
+        pix = QPixmap.fromImage(qimg)
+
+        self.preview_label.setPixmap(
+            pix.scaled(
+                self.preview_label.width(),
+                self.preview_label.height(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+        )
+
+    # =========================================================
+    # ▶ 재생 기능
+    # =========================================================
+    def play_video(self):
+        if not self.current_video_path:
+            return
+
+        # 이미지면 재생 없음
+        if self.current_video_path.lower().endswith((".jpg", ".jpeg", ".png")):
+            return
+
+        # 영상 다시 로드
+        self.video_cap = cv2.VideoCapture(self.current_video_path)
+
+        # 타이머 시작 (30fps)
+        self.video_timer.start(33)
+
+    # =========================================================
+    # ■ 정지 기능
+    # =========================================================
+    def stop_video(self):
+        self.video_timer.stop()
+
+        if self.video_cap:
+            self.video_cap.release()
+            self.video_cap = None
+
+    # =========================================================
+    # 타이머 — 영상 프레임 업데이트
+    # =========================================================
+    def _update_video_frame(self):
+        if not self.video_cap:
+            return
+
+        ok, frame = self.video_cap.read()
+        if not ok:
+            self.stop_video()
+            return
+
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = frame.shape
+        qimg = QImage(frame.data, w, h, w * ch, QImage.Format_RGB888)
+
         pixmap = QPixmap.fromImage(qimg)
 
         self.preview_label.setPixmap(
@@ -467,21 +537,18 @@ class HistoryPage(QWidget):
         if msg != QMessageBox.Yes:
             return
 
-        # 모델 파일 삭제
         try:
             if models_file and os.path.isfile(models_file):
                 os.remove(models_file)
         except:
             pass
 
-        # runs 삭제
         try:
             if run_dir and os.path.isdir(run_dir):
                 shutil.rmtree(run_dir)
         except:
             pass
 
-        # history 삭제
         try:
             if history_dir and os.path.isdir(history_dir):
                 shutil.rmtree(history_dir)
@@ -493,3 +560,4 @@ class HistoryPage(QWidget):
         self.media_list.clear()
         self.preview_label.setText("미리보기 없음")
         self.conf_label.setText("conf: -")
+

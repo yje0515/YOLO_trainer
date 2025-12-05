@@ -14,12 +14,12 @@ class Sidebar(QWidget):
 
         self.buttons = []
 
-        # ⭐ 지은님 요청한 순서
+        # 사이드바 메뉴
         menu_list = [
             "🏠 Dashboard",
             "📚 History",
-            "📄 Model List",
-            "📁 Dataset Download",
+            "📈 Model Graph",
+            "📁 Dataset",
             "🧪 Train",
             "🔍 Predict",
         ]

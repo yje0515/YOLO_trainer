@@ -2,6 +2,7 @@ import os
 import datetime
 import cv2
 import numpy as np
+import json
 
 from PySide6.QtCore import QThread, Signal, Qt
 from PySide6.QtGui import QPixmap, QImage
@@ -25,18 +26,17 @@ class PredictWorker(QThread):
         super().__init__()
         self.model_path = model_path
         self.source_path = source_path
-        self.save_dir = save_dir     # 최종 저장 디렉토리 (predict_log/predict_xxxx)
+        self.save_dir = save_dir
         self.conf = conf
 
     def run(self):
         model = YOLO(self.model_path)
 
-        # 실시간 + 저장
         results = model.predict(
             source=self.source_path,
             save=True,
-            project=self.save_dir,   # predict_log/predict_xxxx
-            name="media",            # predict_xxxx/media 안에 저장됨
+            project=self.save_dir,
+            name="media",
             conf=self.conf,
             stream=True,
             exist_ok=True,
@@ -44,30 +44,29 @@ class PredictWorker(QThread):
         )
 
         for r in results:
-            annotated = r.plot()     # YOLO가 그린 BGR frame
+            annotated = r.plot()
             self.frame_ready.emit(annotated)
 
         final_dir = os.path.join(self.save_dir, "media")
-        # 🔥 predict_metadata.json 저장 (추가)
+
+        # metadata 저장
         metadata = {
             "model_path": self.model_path,
             "source_path": self.source_path,
             "save_dir": final_dir,
             "conf": self.conf
         }
-
-        meta_path = os.path.join(self.save_dir, "predict_metadata.json")
         try:
-            import json
-            with open(meta_path, "w", encoding="utf-8") as f:
+            with open(os.path.join(self.save_dir, "predict_metadata.json"), "w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=4, ensure_ascii=False)
         except Exception as e:
             self.log_signal.emit(f"❌ metadata 저장 실패: {e}")
+
         self.finished_ok.emit(final_dir)
 
 
 # ====================================
-#   Predict Page UI
+#   Predict Page
 # ====================================
 class PredictPage(QWidget):
 
@@ -76,9 +75,7 @@ class PredictPage(QWidget):
         self.overlay = None
         self.paths = settings
 
-        # 최신 train timestamp 가져오기 위해 저장
         self.latest_train_timestamp = None
-
         self.selected_path = None
 
         layout = QVBoxLayout(self)
@@ -112,8 +109,8 @@ class PredictPage(QWidget):
 
         self.conf_label = QLabel("50% 이상만 표시")
         row_conf.addWidget(self.conf_label)
-
         self.conf_slider.valueChanged.connect(self.on_conf_changed)
+
         layout.addLayout(row_conf)
 
         # -------------------------------------------------
@@ -150,69 +147,109 @@ class PredictPage(QWidget):
 
         layout.addStretch()
 
-        # 초기 모델 목록 로딩
+        # 모델 목록 로딩
         self.refresh_model_list()
 
-    # =======================================================
-    # main.py에서 overlay를 받기 위한 함수
     # =======================================================
     def set_overlay(self, overlay):
         self.overlay = overlay
 
-    # =======================================================
-    # settings 변경 시 반영
     # =======================================================
     def update_paths(self, settings: dict):
         self.paths = settings
         self.refresh_model_list()
 
     # =======================================================
-    # 모델 목록 리프레시
+    # Dataset별 모델 분류 + 최신순 정렬 + 최신 모델 강조
     # =======================================================
     def refresh_model_list(self, _=None):
         self.model_combo.clear()
         models_dir = self.paths.get("models_dir", "")
+        history_dir = self.paths.get("history_dir", "")
 
-        if not os.path.exists(models_dir):
+        if not os.path.isdir(models_dir) or not os.path.isdir(history_dir):
             return
 
-        for f in os.listdir(models_dir):
-            if f.endswith(".pt"):
-                self.model_combo.addItem(f)
-
-        # 최신 train timestamp 찾아서 저장
-        history_dir = self.paths.get("history_dir", "")
-        self.latest_train_timestamp = self._get_latest_train_timestamp(history_dir)
-
-    # train 기록 중 최신 폴더명(timestamp) 가져오기
-    def _get_latest_train_timestamp(self, history_dir):
-        if not os.path.isdir(history_dir):
-            return None
-
+        # metadata 기반 모델 목록 구성
+        grouped = {"fire": [], "human": [], "etc": [], "unknown": []}
+        metadata_map = {}
         timestamps = []
-        for name in os.listdir(history_dir):
-            sub = os.path.join(history_dir, name)
-            if os.path.isdir(sub):
-                timestamps.append(name)
 
-        if not timestamps:
-            return None
+        for folder in os.listdir(history_dir):
+            meta_path = os.path.join(history_dir, folder, "metadata.json")
+            if not os.path.isfile(meta_path):
+                continue
 
-        # timestamp 내림차순 정렬
-        try:
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except:
+                continue
+
+            dataset = meta.get("dataset", "unknown")
+            model_file = os.path.basename(meta.get("models_file"))
+            timestamp = meta.get("timestamp")
+
+            metadata_map[model_file] = {
+                "dataset": dataset,
+                "timestamp": timestamp
+            }
+            timestamps.append(timestamp)
+
+            if dataset not in grouped:
+                grouped["etc"].append(model_file)
+            else:
+                grouped[dataset].append(model_file)
+
+        # 최신 timestamp 찾기
+        if timestamps:
             timestamps.sort(reverse=True)
-            return timestamps[0]
-        except:
-            return None
+            self.latest_train_timestamp = timestamps[0]
+        else:
+            self.latest_train_timestamp = None
 
-    # =======================================================
-    # Confidence 슬라이더
+        # ---------------------------------------------------
+        # QComboBox 구성
+        # ---------------------------------------------------
+        def add_header(text):
+            self.model_combo.addItem(text)
+            idx = self.model_combo.count() - 1
+            item = self.model_combo.model().item(idx)
+            item.setEnabled(False)
+            item.setForeground(Qt.gray)
+
+        dataset_labels = {
+            "fire": "🔥 Fire Models",
+            "human": "🧍 Human Models",
+            "etc": "📦 ETC Models",
+            "unknown": "❓ Unknown Models"
+        }
+
+        # dataset별 최신순 정렬
+        for ds, label in dataset_labels.items():
+            models = grouped[ds]
+            if not models:
+                continue
+
+            # 최신순 (metadata timestamp 기준)
+            models.sort(key=lambda m: metadata_map[m]["timestamp"], reverse=True)
+
+            add_header(f"--- {label} ---")
+
+            for model_file in models:
+                display_text = f"{metadata_map[model_file]['timestamp']} | {model_file}"
+                self.model_combo.addItem(display_text)
+
+                # 최신 모델 강조
+                if metadata_map[model_file]["timestamp"] == self.latest_train_timestamp:
+                    idx = self.model_combo.count() - 1
+                    item = self.model_combo.model().item(idx)
+                    item.setBackground(Qt.cyan)
+
     # =======================================================
     def on_conf_changed(self, value: int):
         self.conf_label.setText(f"{value}% 이상만 표시")
 
-    # =======================================================
-    # 파일 선택 → 미리보기 표시
     # =======================================================
     def select_file(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -223,9 +260,6 @@ class PredictPage(QWidget):
             self.log_box.append(f"📂 선택됨: {path}")
             self.show_preview(path)
 
-    # -------------------------------------------------------
-    # 미리보기 표시 (이미지/영상 첫 프레임)
-    # -------------------------------------------------------
     def show_preview(self, path: str):
         if path.lower().endswith((".jpg", ".jpeg", ".png")):
             pixmap = QPixmap(path)
@@ -235,12 +269,11 @@ class PredictPage(QWidget):
                         self.previewLabel.width(),
                         self.previewLabel.height(),
                         Qt.KeepAspectRatio,
-                        Qt.SmoothTransformation
+                        Qt.SmoothTransformation,
                     )
                 )
             return
 
-        # 영상
         cap = cv2.VideoCapture(path)
         ok, frame = cap.read()
         cap.release()
@@ -256,31 +289,28 @@ class PredictPage(QWidget):
                     self.previewLabel.width(),
                     self.previewLabel.height(),
                     Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation
+                    Qt.SmoothTransformation,
                 )
             )
 
-    # =======================================================
-    # 🔥 Predict 실행
     # =======================================================
     def run_predict(self):
         if not self.selected_path:
             self.log_box.append("❌ 먼저 파일을 선택해주세요.")
             return
 
-        model_file = self.model_combo.currentText()
-        if not model_file:
-            self.log_box.append("❌ 사용할 모델이 없습니다.")
+        display_text = self.model_combo.currentText()
+        if "---" in display_text:
+            self.log_box.append("❌ 모델을 선택해주세요.")
             return
+
+        model_file = display_text.split("|")[1].strip()
+        model_path = os.path.join(self.paths["models_dir"], model_file)
 
         if not self.latest_train_timestamp:
-            self.log_box.append("❌ train 기록을 찾지 못했습니다.")
+            self.log_box.append("❌ train 기록이 없습니다.")
             return
 
-        # --------------------------------------------------
-        # 경로 구성 (A안)
-        #   history/{timestamp}/predict_log/predict_YYMMDD_HHMM/
-        # --------------------------------------------------
         predict_root = os.path.join(
             self.paths["history_dir"],
             self.latest_train_timestamp,
@@ -292,22 +322,11 @@ class PredictPage(QWidget):
         save_dir = os.path.join(predict_root, now_dir_name)
         os.makedirs(save_dir, exist_ok=True)
 
-        # --------------------------------------------------
-        # 모델 파일 경로
-        # --------------------------------------------------
-        model_path = os.path.join(self.paths["models_dir"], model_file)
-
-        # conf
-        conf_percent = self.conf_slider.value()
-        conf = conf_percent / 100.0
-
-        self.log_box.append(f"⚙ Confidence: {conf_percent}%")
-        self.log_box.append(f"📁 저장 경로: {save_dir}")
+        conf = self.conf_slider.value() / 100.0
 
         if self.overlay:
             self.overlay.show_overlay("🔍 추론 중...")
 
-        # Worker 실행
         self.worker = PredictWorker(
             model_path=model_path,
             source_path=self.selected_path,
@@ -318,8 +337,6 @@ class PredictPage(QWidget):
         self.worker.finished_ok.connect(self.predict_finished)
         self.worker.start()
 
-    # =======================================================
-    # 실시간 프레임 업데이트
     # =======================================================
     def update_preview(self, frame):
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -333,12 +350,10 @@ class PredictPage(QWidget):
                 self.previewLabel.width(),
                 self.previewLabel.height(),
                 Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
+                Qt.SmoothTransformation,
             )
         )
 
-    # =======================================================
-    # predict 완료 콜백
     # =======================================================
     def predict_finished(self, final_dir):
         self.log_box.append(f"✔ 결과 저장 완료: {final_dir}")

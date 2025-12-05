@@ -27,6 +27,58 @@ def fig_to_pixmap(fig):
 
 
 # ============================================================
+# Dataset별 mAP50 최근 10개 그래프
+# ============================================================
+class DatasetMapChart(QWidget):
+    def __init__(self, entries):
+        super().__init__()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 10)
+
+        fig = self.build_figure(entries)
+        pix = fig_to_pixmap(fig)
+        plt.close(fig)
+
+        lbl = QLabel()
+        lbl.setAlignment(Qt.AlignCenter)
+        lbl.setPixmap(
+            pix.scaled(620, 260, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        )
+        layout.addWidget(lbl)
+
+    def build_figure(self, entries):
+        fig, ax = plt.subplots(figsize=(6.2, 2.6))
+
+        if not entries:
+            ax.text(0.5, 0.5, "데이터 없음", ha="center", va="center")
+            return fig
+
+        # 최신순 정렬 → 오래된 순으로 재정렬
+        entries = sorted(entries, key=lambda x: x["timestamp"], reverse=True)
+        entries = list(reversed(entries[:10]))
+
+        timestamps = [e["timestamp"] for e in entries]
+        values = [e["map50"] for e in entries]
+
+        ax.plot(
+            range(len(values)), values,
+            linestyle="--",
+            marker="o",
+            linewidth=2,
+            color="#0074FF"
+        )
+
+        ax.set_xticks(range(len(timestamps)))
+        ax.set_xticklabels(timestamps, rotation=45, ha="right", fontsize=8)
+        ax.set_title("최근 10개 모델 성능 (mAP50)", fontsize=11)
+        ax.set_ylabel("mAP50")
+        ax.grid(True, alpha=0.25)
+
+        return fig
+
+
+# ============================================================
 # Model Card + Graph (Small version)
 # ============================================================
 class ModelCard(QWidget):
@@ -69,13 +121,13 @@ class ModelCard(QWidget):
         layout.addWidget(card)
 
         # ---------------------------
-        # 그래프 추가 (Combined Loss/Accuracy)
+        # 그래프 추가
         # ---------------------------
         graph = self.create_graph_combined(run_dir)
         layout.addWidget(self.graph_label(graph))
 
     # ============================================================
-    # Loss / Accuracy 통합 그래프 (소형 버전)
+    # Loss / Accuracy 통합 그래프
     # ============================================================
     def create_graph_combined(self, run_dir):
         if not run_dir:
@@ -90,42 +142,27 @@ class ModelCard(QWidget):
             df = pd.read_csv(csv_path)
             df.columns = [c.strip() for c in df.columns]
 
-            # Accuracy 컬럼 찾기
             acc_col = next((c for c in df.columns if "mAP50" in c), None)
-            # Loss 컬럼 찾기
             loss_col = next((c for c in df.columns if "box_loss" in c), None)
 
             fig, ax1 = plt.subplots(figsize=(3.0, 1.4))
 
-            # LOSS (left axis)
             if loss_col:
                 ax1.plot(
-                    df[loss_col],
-                    color="#FF4444",
-                    marker="o",
-                    markersize=3,
-                    linewidth=1.3,
-                    label="Loss"
+                    df[loss_col], color="#FF4444",
+                    marker="o", markersize=3, linewidth=1.3
                 )
                 ax1.set_ylabel("Loss", color="#FF4444", fontsize=8)
-                ax1.tick_params(axis='y', labelcolor="#FF4444", labelsize=7)
 
-            # ACCURACY (right axis)
             if acc_col:
                 ax2 = ax1.twinx()
                 ax2.plot(
-                    df[acc_col],
-                    color="#0074FF",
-                    marker="o",
-                    markersize=3,
-                    linewidth=1.3,
-                    label="Accuracy"
+                    df[acc_col], color="#0074FF",
+                    marker="o", markersize=3, linewidth=1.3
                 )
                 ax2.set_ylabel("Acc", color="#0074FF", fontsize=8)
-                ax2.tick_params(axis='y', labelcolor="#0074FF", labelsize=7)
 
             ax1.set_xlabel("Epoch", fontsize=8)
-            ax1.tick_params(axis='x', labelsize=7)
             ax1.set_title("Loss / Accuracy", fontsize=9)
             ax1.grid(True, alpha=0.25)
 
@@ -136,9 +173,6 @@ class ModelCard(QWidget):
         except Exception:
             return QPixmap()
 
-    # ============================================================
-    # QLabel wrapping for graph
-    # ============================================================
     def graph_label(self, pix):
         lbl = QLabel()
         lbl.setAlignment(Qt.AlignCenter)
@@ -153,7 +187,7 @@ class ModelCard(QWidget):
 
 
 # ============================================================
-# Model Comparison Page (Grid Layout 3 per row)
+# Model Comparison Page — 3-per-row grid + dataset tabs
 # ============================================================
 class ModelComparisonPage(QWidget):
     def __init__(self, settings: dict):
@@ -164,57 +198,76 @@ class ModelComparisonPage(QWidget):
         main.setContentsMargins(20, 20, 20, 20)
         main.setSpacing(10)
 
-        title = QLabel("📚 Model Comparison")
+        title = QLabel("📈 Model Graph")
         title.setStyleSheet("font-size: 20px; font-weight: bold;")
         main.addWidget(title)
 
         self.tabs_widget = QTabWidget()
         main.addWidget(self.tabs_widget)
 
-        # 탭 3개 생성
+        # 🔥 etc 탭 추가됨
         self.tabs = {
             "fire": self._create_tab("🔥 Fire Dataset"),
             "human": self._create_tab("🧍 Human Dataset"),
+            "etc": self._create_tab("📦 Etc Dataset"),
             "unknown": self._create_tab("❓ Unknown Dataset"),
         }
 
         self.reload_models()
 
     # ============================================================
-    # Create scrollable tab with GridLayout (3 columns)
+    # Create scrollable tab with grid
     # ============================================================
     def _create_tab(self, label):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
 
         container = QWidget()
-        grid = QGridLayout(container)
+        container_layout = QVBoxLayout(container)
+        container_layout.setSpacing(15)
+        container_layout.setContentsMargins(10, 10, 10, 10)
+
+        grid = QGridLayout()
         grid.setSpacing(15)
-        grid.setContentsMargins(10, 10, 10, 10)
+
+        container_layout.addLayout(grid)
+        container_layout.addStretch()
 
         scroll.setWidget(container)
         self.tabs_widget.addTab(scroll, label)
-        return grid
+
+        return {"layout": container_layout, "grid": grid}
 
     # ============================================================
-    # Reload all model cards into grids
+    # Reload model cards & graphs per dataset
     # ============================================================
     def reload_models(self):
         history_dir = self.paths.get("history_dir", "C:/yolo_data/history")
         if not os.path.isdir(history_dir):
             return
 
-        # Clear present widgets
-        for grid in self.tabs.values():
+        # 탭 초기화
+        for tab in self.tabs.values():
+            layout = tab["layout"]
+            grid = tab["grid"]
+
             while grid.count():
                 item = grid.takeAt(0)
                 if item.widget():
                     item.widget().deleteLater()
 
-        # 최신순 정렬
+            # 기존 그래프 제거
+            if layout.count() > 1:
+                old = layout.itemAt(0).widget()
+                if old:
+                    old.deleteLater()
+
         folders = sorted(os.listdir(history_dir), reverse=True)
 
-        # insert models 3 per row
+        # 🔥 여기에도 etc 추가
+        dataset_entries = {"fire": [], "human": [], "etc": [], "unknown": []}
+
+        # 카드 배치
         for folder in folders:
             sub = os.path.join(history_dir, folder)
             meta_path = os.path.join(sub, "metadata.json")
@@ -229,17 +282,32 @@ class ModelComparisonPage(QWidget):
                 continue
 
             dataset = meta.get("dataset", "unknown")
+
+            # etc 처리
+            if dataset not in dataset_entries:
+                dataset = "etc"
+
             run_dir = meta.get("run_dir")
+
+            # 그래프용 데이터 저장
+            if meta.get("map50") is not None:
+                dataset_entries[dataset].append(meta)
+
             card = ModelCard(meta, run_dir)
 
-            # insert in grid
-            grid = self.tabs.get(dataset, self.tabs["unknown"])
-            row = grid.rowCount()
-            col = grid.columnCount()
+            tab = self.tabs.get(dataset, self.tabs["unknown"])
+            grid = tab["grid"]
 
-            # 계산식: 현재 widget 수 기반으로 위치 계산
             count = grid.count()
             row = count // 3
             col = count % 3
 
             grid.addWidget(card, row, col)
+
+        # ---------------------------
+        # 각 탭 상단에 그래프 삽입
+        # ---------------------------
+        for ds, tab in self.tabs.items():
+            entries = dataset_entries.get(ds, [])
+            chart = DatasetMapChart(entries)
+            tab["layout"].insertWidget(0, chart)
