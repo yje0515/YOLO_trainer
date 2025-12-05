@@ -1,4 +1,3 @@
-# sidebar.py
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QPushButton
 from PySide6.QtCore import Signal
 
@@ -15,9 +14,11 @@ class Sidebar(QWidget):
 
         self.buttons = []
 
+        # ⭐ 지은님 요청한 순서
         menu_list = [
             "🏠 Dashboard",
-            "📚 Model History",
+            "📚 History",
+            "📄 Model List",
             "📁 Dataset Download",
             "🧪 Train",
             "🔍 Predict",
@@ -46,10 +47,12 @@ class Sidebar(QWidget):
         layout.addStretch()
         self.current_index = None
 
+    # ================================
     def on_button_clicked(self, index: int):
         self.set_active(index)
         self.menu_clicked.emit(index)
 
+    # ================================
     def set_active(self, index: int):
         for i, btn in enumerate(self.buttons):
             if i == index:
@@ -82,4 +85,5 @@ class Sidebar(QWidget):
                         background-color: #F5F5F5;
                     }
                 """)
+
         self.current_index = index

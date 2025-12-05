@@ -1,3 +1,4 @@
+import os
 import sys
 from PySide6.QtWidgets import (
     QApplication, QWidget, QHBoxLayout, QVBoxLayout,
@@ -11,7 +12,26 @@ from pages.predict import PredictPage
 from pages.history import HistoryPage
 from pages.settings import SettingsPage, load_settings
 
+# ⭐ 새로 추가된 페이지
+from pages.model_comparison import ModelComparisonPage
+
 from widgets.overlay import LoadingOverlay
+
+# ======================
+# matplotlib 한글 폰트 설정
+# ======================
+import matplotlib
+import matplotlib.font_manager as fm
+
+font_path = "C:/Windows/Fonts/malgun.ttf"
+
+if os.path.exists(font_path):
+    fm.fontManager.addfont(font_path)
+    matplotlib.rc("font", family="Malgun Gothic")
+else:
+    matplotlib.rc("font", family="DejaVu Sans")
+
+matplotlib.rcParams['axes.unicode_minus'] = False
 
 
 class MainWindow(QWidget):
@@ -19,7 +39,7 @@ class MainWindow(QWidget):
         super().__init__()
 
         self.setWindowTitle("YOLO Trainer - By YJE")
-        self.resize(1300, 850)
+        self.resize(1400, 850)
 
         # settings.json 로드
         self.settings = load_settings()
@@ -33,16 +53,23 @@ class MainWindow(QWidget):
         sidebar = QVBoxLayout()
         self.stack = QStackedWidget()
 
-        self.btn_dashboard = QPushButton("📊 Dashboard")
+        # ⭐ 여기서 버튼 순서 + ModelList 추가
+        self.btn_dashboard = QPushButton("🏠 Dashboard")
+        self.btn_history = QPushButton("📚 History")
+        self.btn_model_comparison = QPushButton("📄 Model Comparison")  # ⭐ 추가됨
         self.btn_dataset = QPushButton("📁 Dataset")
         self.btn_train = QPushButton("🧪 Train")
         self.btn_predict = QPushButton("🔍 Predict")
-        self.btn_history = QPushButton("📜 History")
         self.btn_settings = QPushButton("⚙ Settings")
 
         buttons = [
-            self.btn_dashboard, self.btn_dataset, self.btn_train,
-            self.btn_predict, self.btn_history, self.btn_settings
+            self.btn_dashboard,     # index 0
+            self.btn_history,       # index 1
+            self.btn_model_comparison,    # index 2 ⭐ 추가
+            self.btn_dataset,       # index 3
+            self.btn_train,         # index 4
+            self.btn_predict,       # index 5
+            self.btn_settings       # index 6
         ]
 
         for idx, btn in enumerate(buttons):
@@ -56,24 +83,27 @@ class MainWindow(QWidget):
         # -----------------------------
         # 페이지 스택 (우측 화면)
         # -----------------------------
-        self.page_dashboard = DashboardPage(self.settings)
-        self.page_dataset = DatasetPage(self.settings)
-        self.page_train = TrainPage(self.settings)
-        self.page_predict = PredictPage(self.settings)
-        self.page_history = HistoryPage(self.settings)
-        self.page_settings = SettingsPage()
+        self.page_dashboard = DashboardPage(self.settings)      # 0
+        self.page_history = HistoryPage(self.settings)          # 1
+        self.page_model_comparison = ModelComparisonPage(self.settings)     # 2 ⭐ 추가된 페이지
+        self.page_dataset = DatasetPage(self.settings)          # 3
+        self.page_train = TrainPage(self.settings)              # 4
+        self.page_predict = PredictPage(self.settings)          # 5
+        self.page_settings = SettingsPage()                     # 6
 
-        self.stack.addWidget(self.page_dashboard)  # index: 0
-        self.stack.addWidget(self.page_dataset)    # index: 1
-        self.stack.addWidget(self.page_train)      # index: 2
-        self.stack.addWidget(self.page_predict)    # index: 3
-        self.stack.addWidget(self.page_history)    # index: 4
-        self.stack.addWidget(self.page_settings)   # index: 5
+        # 페이지 스택에 추가
+        self.stack.addWidget(self.page_dashboard)
+        self.stack.addWidget(self.page_history)
+        self.stack.addWidget(self.page_model_comparison)   # ⭐ 새로운 페이지
+        self.stack.addWidget(self.page_dataset)
+        self.stack.addWidget(self.page_train)
+        self.stack.addWidget(self.page_predict)
+        self.stack.addWidget(self.page_settings)
 
         layout.addWidget(self.stack, 4)
 
         # -----------------------------
-        # 공통 로딩 오버레이(햄토리)
+        # 공통 로딩 오버레이
         # -----------------------------
         self.overlay = LoadingOverlay(self)
 
@@ -90,18 +120,15 @@ class MainWindow(QWidget):
         # -----------------------------
         # 시그널 연결
         # -----------------------------
-
-        # Dataset → Train : data.yaml 경로 전달
         if hasattr(self.page_dataset, "dataset_ready") and hasattr(self.page_train, "set_dataset_path"):
             self.page_dataset.dataset_ready.connect(self.page_train.set_dataset_path)
 
-        # Settings 변경 → 모든 페이지 업데이트
         self.page_settings.settings_changed.connect(self.update_settings)
 
-        # Train에서 모델 저장 시 Predict/History 갱신
         if hasattr(self.page_train, "model_saved_signal"):
             self.page_train.model_saved_signal.connect(self.page_predict.refresh_model_list)
             self.page_train.model_saved_signal.connect(self.page_history.reload_history)
+            self.page_train.model_saved_signal.connect(self.page_model_comparison.reload_models)  # ⭐ 모델리스트 갱신 추가
 
         # 기본 페이지: Dashboard
         self.stack.setCurrentIndex(0)
@@ -117,7 +144,8 @@ class MainWindow(QWidget):
             self.page_dataset,
             self.page_train,
             self.page_predict,
-            self.page_history
+            self.page_history,
+            self.page_model_comparison   # ⭐ Model List 페이지도 반영해야 함
         ]
 
         for page in pages:
