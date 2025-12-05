@@ -17,6 +17,7 @@ from ultralytics import YOLO
 
 # ======================================================
 # 🔥 데이터셋 자동 판별 (fire / human)
+#   - 지금은 "기본값 제안" 용도로만 사용
 # ======================================================
 def detect_dataset_from_yaml(yaml_path: str) -> str:
     """
@@ -62,7 +63,7 @@ class TrainWorker(QThread):
         self.epochs = epochs
         self.patience = patience
         self.paths = paths
-        self.dataset_name = dataset_name   # fire / human / unknown
+        self.dataset_name = dataset_name   # fire / human / etc / unknown
 
     def run(self):
         timestamp = datetime.datetime.now().strftime("%y%m%d_%H%M")
@@ -80,7 +81,7 @@ class TrainWorker(QThread):
         # -------------------------
         self.log_signal.emit(f"🧪 학습 시작 ({timestamp})")
         self.log_signal.emit(f"data.yaml: {self.data_yaml}")
-        self.log_signal.emit(f"dataset 자동 감지: {self.dataset_name}")
+        self.log_signal.emit(f"선택한 dataset 카테고리: {self.dataset_name}")
 
         # stdout redirect
         class Redirect(io.TextIOBase):
@@ -201,7 +202,7 @@ class TrainWorker(QThread):
         meta = {
             "timestamp": timestamp,
             "data_yaml": self.data_yaml,
-            "dataset": self.dataset_name,     # fire / human / unknown
+            "dataset": self.dataset_name,     # 🔥 사용자가 선택한 카테고리
             "base_model": self.model_name,
             "epochs": self.epochs,
             "patience": self.patience,
@@ -245,6 +246,23 @@ class TrainPage(QWidget):
         btn_sel = QPushButton("📂 data.yaml 불러오기")
         btn_sel.clicked.connect(self.select_dataset)
         layout.addWidget(btn_sel)
+
+        # -------------------------
+        # Dataset Category 선택 (필수)
+        # -------------------------
+        row_ds = QHBoxLayout()
+        row_ds.addWidget(QLabel("Dataset Category:"))
+
+        self.dataset_combo = QComboBox()
+        # 첫 항목은 '선택하세요' → 이 상태면 학습 불가
+        self.dataset_combo.addItem("카테고리 선택")
+        self.dataset_combo.addItem("fire")
+        self.dataset_combo.addItem("human")
+        self.dataset_combo.addItem("etc")
+        self.dataset_combo.addItem("unknown")
+        row_ds.addWidget(self.dataset_combo)
+
+        layout.addLayout(row_ds)
 
         # 모델 선택
         row1 = QHBoxLayout()
@@ -295,7 +313,21 @@ class TrainPage(QWidget):
     def set_dataset_path(self, path: str):
         self.data_yaml = path
         self.dataset_label.setText(f"📂 선택된 data.yaml: {path}")
-        self.dataset_name = detect_dataset_from_yaml(path)
+
+        # 자동 감지 결과를 기본 선택값으로 제안만 해줌
+        auto_ds = detect_dataset_from_yaml(path)
+        self.dataset_name = auto_ds
+
+        # 콤보박스 쪽에도 추천값 반영 (있으면 변경)
+        if hasattr(self, "dataset_combo"):
+            idx = self.dataset_combo.findText(auto_ds)
+            if idx >= 0:
+                self.dataset_combo.setCurrentIndex(idx)
+            else:
+                # fire/human/etc/unknown 중 없는 값이면 unknown으로
+                idx2 = self.dataset_combo.findText("unknown")
+                if idx2 >= 0:
+                    self.dataset_combo.setCurrentIndex(idx2)
 
     def select_dataset(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -309,8 +341,22 @@ class TrainPage(QWidget):
             self.log_box.append("❌ data.yaml 선택 후 학습이 가능합니다.")
             return
 
-        epochs = int(self.epoch_input.text())
-        patience = int(self.patience_input.text())
+        # 🔥 Dataset 카테고리 필수 선택
+        current_ds = self.dataset_combo.currentText()
+        if current_ds == "카테고리 선택":
+            self.log_box.append("❌ Dataset 카테고리를 먼저 선택해주세요. (fire / human / etc / unknown)")
+            return
+
+        # 최종 선택값 반영
+        self.dataset_name = current_ds
+
+        try:
+            epochs = int(self.epoch_input.text())
+            patience = int(self.patience_input.text())
+        except ValueError:
+            self.log_box.append("❌ Epochs / Patience는 정수로 입력해주세요.")
+            return
+
         model_name = self.model_combo.currentText()
 
         self.btn_start.setEnabled(False)
