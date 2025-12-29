@@ -80,7 +80,7 @@ class TrainWorker(QThread):
     log_signal = Signal(str)
     finished_ok = Signal(str)
 
-    # 🔥 추가: 진행 상황 실시간 전파
+    # 🔥 진행 상황 실시간 전파
     # elapsed_sec, expected_total_sec, current_epoch, total_epochs
     progress_signal = Signal(float, float, int, int)
 
@@ -94,9 +94,9 @@ class TrainWorker(QThread):
         self.dataset_name = dataset_name   # fire / human / etc / unknown
 
         # ---- 진행률/ETA 계산용 내부 상태 ----
-        self._start_time: float | None = None        # 학습 전체 시작 시각
-        self._prepare_end_time: float | None = None  # 이미지 스캔/준비 끝난 시각 (Epoch 1 시작 근처)
-        self._epoch1_end_time: float | None = None   # Epoch 1 종료 시각 (Epoch 2 로그 등장 시점)
+        self._start_time: float | None = None        # 학습 전체 시작 시각(초)
+        self._prepare_end_time: float | None = None  # 이미지 스캔/준비 끝난 시각
+        self._epoch1_end_time: float | None = None   # Epoch 1 종료 시각(= Epoch2 등장 시점)
         self._expected_total_time: float | None = None  # 예상 총 학습시간 (초)
         self._first_epoch_seen_time: float | None = None
         self.current_epoch: int = 0
@@ -121,11 +121,11 @@ class TrainWorker(QThread):
         if m:
             ep = int(m.group(1))
             total = int(m.group(2))
-            # 총 Epoch 정보 업데이트 (YOLO 설정과 다를 일은 거의 없지만 방어용)
+            # 총 Epoch 정보 업데이트
             if total > 0:
                 self.total_epochs = total
 
-            # 현재 Epoch 갱신 (뒤에서 진행률 계산에 사용)
+            # 현재 Epoch 갱신
             if ep > self.current_epoch:
                 self.current_epoch = ep
 
@@ -173,7 +173,7 @@ class TrainWorker(QThread):
         elapsed = now - self._start_time
         expected = self._expected_total_time
 
-        # 학습이 모두 끝난 뒤 post-processing 중일 때 강제로 100% 맞춰주기
+        # 학습이 모두 끝난 뒤 post-processing 중일 때 강제로 100% 근처로 맞춰주기
         if force_done:
             if expected is None or expected < elapsed:
                 expected = elapsed
@@ -190,7 +190,7 @@ class TrainWorker(QThread):
         else:
             progress = int(min(100, (elapsed / expected) * 100))
 
-        # UI 쪽에서 퍼센트는 다시 계산할 수 있게, 여기선 시간/epoch 정보만 보냄
+        # UI 쪽에서 퍼센트는 다시 계산할 수 있도록, 여기선 시간/epoch 정보만 보냄
         self.progress_signal.emit(elapsed, expected, self.current_epoch, self.total_epochs)
 
     def run(self):
@@ -372,6 +372,10 @@ class TrainPage(QWidget):
         self.dataset_name = "unknown"
         self.update_paths(settings)
 
+        # 🔥 ETA(종료시각) 계산용: 학습 시작 시각
+        self.train_start_wall: datetime.datetime | None = None
+        self.eta_logged = False  # 로그창에 ETA 한 번만 찍기 위한 플래그
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(30, 30, 30, 30)
 
@@ -445,7 +449,9 @@ class TrainPage(QWidget):
         self.progress_bar.setValue(0)
         layout.addWidget(self.progress_bar)
 
-        self.progress_label = QLabel("진행률: 0%  |  경과 00:00 / 예상 -  (Epoch 0/0)")
+        self.progress_label = QLabel(
+            "진행률: 0%  |  경과 00:00 / 예상 -  (Epoch 0/0)  |  종료 예정시각: -"
+        )
         self.progress_label.setStyleSheet("color:#555; font-size:12px;")
         layout.addWidget(self.progress_label)
 
@@ -496,7 +502,7 @@ class TrainPage(QWidget):
             self.set_dataset_path(path)
 
     # --------------------------------------------------
-    # 🔥 진행률 업데이트 슬롯
+    # 🔥 진행률/ETA 업데이트 슬롯
     # --------------------------------------------------
     def on_progress_update(self, elapsed_sec: float, expected_sec: float, current_epoch: int, total_epochs: int):
         # 퍼센트 계산
@@ -510,10 +516,24 @@ class TrainPage(QWidget):
 
         self.progress_bar.setValue(progress)
 
+        # 🔥 예상 종료 시각 계산 (start_wall + expected_total_sec)
+        eta_str = "-"
+        if expected_sec and expected_sec > 0 and self.train_start_wall is not None:
+            try:
+                eta_dt = self.train_start_wall + datetime.timedelta(seconds=expected_sec)
+                eta_str = eta_dt.strftime("%H:%M")
+            except Exception:
+                eta_str = "-"
+
+            # 로그에 한 번만 찍기
+            if not self.eta_logged:
+                self.log_box.append(f"🕒 예상 종료 시각: {eta_str} 기준 (보수적 추정)")
+                self.eta_logged = True
+
         self.progress_label.setText(
             f"진행률: {progress}%  |  경과 {format_time(elapsed_sec)} / "
             f"예상 {format_time(expected_sec if expected_sec > 0 else None)}  "
-            f"(Epoch {current_epoch}/{total_epochs})"
+            f"(Epoch {current_epoch}/{total_epochs})  |  종료 예정시각: {eta_str}"
         )
 
     def start_training(self):
@@ -541,9 +561,13 @@ class TrainPage(QWidget):
 
         self.btn_start.setEnabled(False)
 
-        # 진행률 초기화
+        # 진행률/ETA 초기화
         self.progress_bar.setValue(0)
-        self.progress_label.setText("진행률: 0%  |  경과 00:00 / 예상 -  (Epoch 0/0)")
+        self.progress_label.setText(
+            "진행률: 0%  |  경과 00:00 / 예상 -  (Epoch 0/0)  |  종료 예정시각: -"
+        )
+        self.train_start_wall = datetime.datetime.now()
+        self.eta_logged = False
 
         if self.overlay:
             self.overlay.show_overlay("🧪 모델 학습 중...")
